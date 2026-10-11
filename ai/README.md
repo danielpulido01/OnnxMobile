@@ -21,6 +21,13 @@ Corpus original: Speech Commands v0.02, Pete Warden / Google, licencia CC BY 4.0
 Conservar la atribución al compartir los datos derivados; los archivos `README.md`
 y `LICENSE` originales acompañan la descarga.
 
+## Dataset compartido para el equipo
+
+El dataset preprocesado se distribuye mediante un
+[GitHub Release versionado](https://github.com/danielpulido01/OnnxMobile/releases/tag/speech-commands-20261008-v1).
+Consultar [la guía de descarga y verificación](docs/dataset-sharing.md) para
+entrenar con los mismos tensores sin repetir el preprocesamiento.
+
 ## Ejecutar
 
 Desde la raíz del repositorio, con Python 3.11, en PowerShell:

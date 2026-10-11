@@ -2,7 +2,9 @@
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
-ai/data/
+ai/data/raw/
+ai/data/processed/
+ai/data/releases/
 ai/.cache/
 ai/notebooks/*.executed.ipynb
 ai/runs/
