@@ -8,7 +8,14 @@ en ese orden (IDs 0–10). `unknown` agrupa todas las otras palabras del corpus,
 conservando su palabra original en `source_label`. `_background_noise_` se excluye:
 contiene ruido, no palabras. Se conservan todos los audios válidos y únicos,
 sin submuestreo de la categoría nueva.
-El entrenamiento y la exportación ONNX quedan para una etapa posterior.
+El entrenamiento manual con PyTorch y la evaluación con Weights & Biases están
+implementados en `src/train.py` y `src/evaluate.py`. La exportación ONNX queda
+para una etapa posterior.
+
+Para ejecutar los **12 entrenamientos** (LeNet-5/MobileNetV1 × base/aumentado ×
+tres configuraciones), consultar [la guía de entrenamiento con W&B](docs/training.md),
+[las arquitecturas y sus diagramas](docs/architectures.md) o abrir el
+[notebook de entrenamiento y evaluación](notebooks/02_entrenamiento_evaluacion.ipynb).
 
 Corpus original: Speech Commands v0.02, Pete Warden / Google, licencia CC BY 4.0.
 Conservar la atribución al compartir los datos derivados; los archivos `README.md`
@@ -97,7 +104,8 @@ El orden de clases está en `preprocessing.json`; un cargador que ordene carpeta
 alfabéticamente debe ajustar sus etiquetas a ese contrato.
 
 La normalización no estima estadísticas del conjunto. El notebook no aplica
-aumento de datos; cuando se agregue, deberá afectar únicamente entrenamiento.
+aumento de datos; el entrenamiento aumentado aplica máscaras de tiempo y
+frecuencia únicamente a train, conservando validation/test sin cambios.
 La clase `unknown` aprende de las otras palabras incluidas en el corpus; esto no
 garantiza rechazar cualquier palabra nunca vista. Silencio y ruido no se mezclan
 con palabras y requieren tratamiento propio para un reconocedor continuo.

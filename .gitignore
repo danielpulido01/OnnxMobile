@@ -5,3 +5,5 @@ __pycache__/
 ai/data/
 ai/.cache/
 ai/notebooks/*.executed.ipynb
+ai/runs/
+wandb/
