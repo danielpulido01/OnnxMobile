@@ -110,9 +110,13 @@ Para PyTorch, convertir NHWC a NCHW mediante `np.transpose(X, (0, 3, 1, 2))`.
 El orden de clases está en `preprocessing.json`; un cargador que ordene carpetas
 alfabéticamente debe ajustar sus etiquetas a ese contrato.
 
-La normalización no estima estadísticas del conjunto. El notebook no aplica
-aumento de datos; el entrenamiento aumentado aplica máscaras de tiempo y
-frecuencia únicamente a train, conservando validation/test sin cambios.
+La normalización no estima estadísticas del conjunto. El notebook conserva el
+dataset original. `ai/src/augment.py` exporta otro train con los originales más
+dos copias por ejemplo con **time masking y frequency masking** (SpecAugment):
+100 ejemplos de train pasan a 300. Validation/test se comparten sin cambios.
+El entrenamiento prepara y reutiliza automáticamente esta exportación;
+los trials `base` usan el original y los `augmented` usan el train expandido.
+Ver [training.md](docs/training.md) para generarlo sin entrenar y comparar modelos.
 La clase `unknown` aprende de las otras palabras incluidas en el corpus; esto no
 garantiza rechazar cualquier palabra nunca vista. Silencio y ruido no se mezclan
 con palabras y requieren tratamiento propio para un reconocedor continuo.

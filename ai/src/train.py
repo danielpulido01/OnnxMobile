@@ -16,6 +16,7 @@ import pandas as pd
 import torch
 import wandb
 
+from augment import prepare_augmented_dataset, validate_policy
 from data import inspect_dataset, make_loader, sha256, SpectrogramDataset
 from experiment import (AI_DIR, log_class_metrics, log_provenance, plot_history, profile_model,
                         save_environment, seed_everything, source_fingerprint, write_json,
@@ -37,9 +38,7 @@ def experiment_grid(config):
         raise ValueError("epochs/patience deben ser positivos y min_delta no negativo")
     if config["class_weighting"] not in ("inverse_frequency", "none"):
         raise ValueError("class_weighting no soportado")
-    for key in ("frequency_masks", "frequency_width", "time_masks", "time_width"):
-        if not isinstance(config["augmentation"][key], int) or config["augmentation"][key] < 0:
-            raise ValueError("Los parámetros de aumento deben ser enteros no negativos")
+    validate_policy(config["augmentation"])
     experiments = []
     for architecture in ("lenet5", "mobilenet_v1"):
         for variant in ("base", "augmented"):
@@ -79,15 +78,17 @@ def fit_one(config, dataset, suite, device, args):
     else:
         env = save_environment(directory, device)
     classes = dataset["metadata"]["classes"]
-    train_data = SpectrogramDataset(dataset["root"], "train")
+    clean_data = SpectrogramDataset(dataset["root"], "train")
+    training_dataset = dataset["augmented"] if config["variant"] == "augmented" else dataset
+    train_data = SpectrogramDataset(training_dataset["root"], "train")
     validation_data = SpectrogramDataset(dataset["root"], "validation")
     train_loader = make_loader(train_data, config["batch_size"], config["seed"], args.workers, True)
-    clean_loader = make_loader(train_data, config["batch_size"], config["seed"], args.workers)
+    clean_loader = make_loader(clean_data, config["batch_size"], config["seed"], args.workers)
     validation_loader = make_loader(validation_data, config["batch_size"], config["seed"], args.workers)
-    counts = np.bincount(train_data.y, minlength=len(classes))
+    counts = np.bincount(clean_data.y, minlength=len(classes))
     if (counts == 0).any():
         raise ValueError("Todas las clases deben estar presentes en entrenamiento")
-    weights = len(train_data) / (len(classes) * counts)
+    weights = len(clean_data) / (len(classes) * counts)
     if config["class_weighting"] == "none":
         weights = np.ones(len(classes))
     class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
@@ -95,13 +96,13 @@ def fit_one(config, dataset, suite, device, args):
     optimizer_args = {"lr": config["lr"], "weight_decay": config["weight_decay"]}
     optimizer = (torch.optim.Adam(model.parameters(), **optimizer_args) if config["optimizer"] == "adam"
                  else torch.optim.SGD(model.parameters(), momentum=config.get("momentum", 0.9), **optimizer_args))
-    augmentation = config["augmentation"] if config["variant"] == "augmented" else None
     augmentation_rng = torch.Generator().manual_seed(config["seed"] + 1000)
     loaders = [train_loader, clean_loader, validation_loader]
     state = None
     if (directory / "last.pt").exists():
         state = torch.load(directory / "last.pt", map_location=device, weights_only=True)
         if (state["config"] != config or state["dataset_fingerprint"] != dataset["fingerprint"]
+                or state["training_dataset_fingerprint"] != training_dataset["fingerprint"]
                 or state["source_sha256"] != source_fingerprint() or state["classes"] != classes):
             raise ValueError("Checkpoint incompatible con configuración, datos o código")
         model.load_state_dict(state["state_dict"])
@@ -125,6 +126,8 @@ def fit_one(config, dataset, suite, device, args):
                     group=suite.name, job_type="train",
                     config={**config, "dataset_fingerprint": dataset["fingerprint"], "environment": env,
                             "class_weights": weights.tolist(), "loss": "weighted_cross_entropy",
+                            "training_dataset_fingerprint": training_dataset["fingerprint"],
+                            "training_samples": len(train_data), "original_training_samples": len(clean_data),
                             "selection_metric": "validation/macro_f1", "resume_from_epoch": first_epoch - 1,
                             "previous_run_id": state["wandb_id"] if state else None},
                     tags=[config["architecture"], config["variant"]]) as run:
@@ -145,8 +148,7 @@ def fit_one(config, dataset, suite, device, args):
             if stale >= config["patience"]:
                 break
             tick = time.perf_counter()
-            train_metrics, _ = run_epoch(model, train_loader, class_weights, device, optimizer,
-                                         augmentation, augmentation_rng)
+            train_metrics, _ = run_epoch(model, train_loader, class_weights, device, optimizer)
             clean_metrics, _ = run_epoch(model, clean_loader, class_weights, device)
             validation_metrics, _ = run_epoch(model, validation_loader, class_weights, device)
             row = {"epoch": epoch, "epoch_seconds": time.perf_counter() - tick, "lr": optimizer.param_groups[0]["lr"]}
@@ -162,6 +164,7 @@ def fit_one(config, dataset, suite, device, args):
                             "optimizer_state": optimizer.state_dict(), "config": config,
                             "classes": classes, "class_weights": weights.tolist(),
                             "dataset_fingerprint": dataset["fingerprint"], "source_sha256": source_fingerprint(),
+                            "training_dataset_fingerprint": training_dataset["fingerprint"],
                             "epoch": epoch, "validation": validation_metrics})
             # min_delta solo controla paciencia; nunca descarta un mejor checkpoint.
             if value > patience_reference + config["min_delta"]:
@@ -172,6 +175,7 @@ def fit_one(config, dataset, suite, device, args):
             save_checkpoint(directory / "last.pt", {
                 "state_dict": model.state_dict(), "optimizer_state": optimizer.state_dict(),
                 "config": config, "classes": classes, "dataset_fingerprint": dataset["fingerprint"],
+                "training_dataset_fingerprint": training_dataset["fingerprint"],
                 "source_sha256": source_fingerprint(), "epoch": epoch, "history": history,
                 "best_checkpoint": best_checkpoint, "stale": stale, "patience_reference": patience_reference,
                 "training_seconds": elapsed + time.perf_counter() - started,
@@ -203,6 +207,9 @@ def fit_one(config, dataset, suite, device, args):
         profile = profile_model(model, device)
         result = {"experiment": config["experiment"], "architecture": config["architecture"],
                   "variant": config["variant"], "trial": config["name"], "seed": config["seed"],
+                  "training_dataset_fingerprint": training_dataset["fingerprint"],
+                  "training_samples": len(train_data), "original_training_samples": len(clean_data),
+                  "optimizer_steps": len(train_loader) * len(history),
                   "optimizer": config["optimizer"], "lr": config["lr"], "batch_size": config["batch_size"],
                   "weight_decay": config["weight_decay"], "best_epoch": best_epoch, "epochs_ran": len(history),
                   "best_validation_macro_f1": best, "best_validation_loss": best_loss,
@@ -220,7 +227,7 @@ def fit_one(config, dataset, suite, device, args):
         artifact.add_dir(str(directory))
         run.log_artifact(artifact, aliases=["best-validation"])
         write_json(directory / "result.json", result)
-    del train_loader, clean_loader, validation_loader, train_data, validation_data, model, optimizer
+    del train_loader, clean_loader, validation_loader, train_data, clean_data, validation_data, model, optimizer
     return result
 
 
@@ -300,7 +307,16 @@ def execute_suite(args, suite):
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available()
                           else "cpu" if args.device == "auto" else args.device)
     dataset = inspect_dataset(args.data)
+    saved_augmented = suite / "augmented_dataset.json"
+    if args.augmented_data is None:
+        args.augmented_data = (Path(json.loads(saved_augmented.read_text(encoding="utf-8"))["root"])
+                               if saved_augmented.exists() else
+                               args.data.with_name(args.data.name + "-augmented"))
+    # Reutilizar la misma exportación fija en ambas arquitecturas y todos los trials.
+    torch.set_num_threads(args.threads)
+    augmented = prepare_augmented_dataset(args.augmented_data, dataset, config["augmentation"], config["seed"] + 1000)
     identity = {"config": config, "dataset_fingerprint": dataset["fingerprint"],
+                "augmented_dataset_fingerprint": augmented["fingerprint"],
                 "source_sha256": source_fingerprint(), "device": str(device),
                 "workers": args.workers, "threads": args.threads,
                 "project": args.project, "entity": args.entity, "wandb_mode": args.wandb_mode}
@@ -309,7 +325,9 @@ def execute_suite(args, suite):
             raise ValueError("No se puede reanudar: cambiaron datos, código o configuración. Los archivos se conservan")
     else:
         write_json(suite / "dataset.json", dataset)
+        write_json(saved_augmented, augmented)
         write_json(suite / "suite.json", identity)
+    dataset["augmented"] = augmented
     results = completed_results(suite, grid)
     completed = {result["experiment"] for result in results}
     pending = [c for c in grid if c["experiment"] not in completed]
@@ -318,6 +336,7 @@ def execute_suite(args, suite):
     else:
         selected = pending if args.all else pending[:1]
     print(f"Suite: {suite}\nDevice: {device}\nComplete: {len(results)}/{len(grid)}\nThis invocation: {len(selected)}", flush=True)
+    print(f"Train samples: base={dataset['counts']['train']}, augmented={augmented['counts']['train']}", flush=True)
     for experiment in selected:
         fit_one(experiment, dataset, suite, device, args)
         # Recolectar TODOS los resultados anteriores, aunque esta invocación entrenó uno solo.
@@ -338,6 +357,7 @@ def execute_suite(args, suite):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, help="Exportación con COMPLETED.json; solo requerida al crear la suite")
+    parser.add_argument("--augmented-data", type=Path, help="Exportación aumentada; por defecto <data>-augmented")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, default=AI_DIR / "runs")
     parser.add_argument("--suite", "--resume-suite", dest="suite", type=Path, help="Carpeta compartida para crear o continuar experimentos")

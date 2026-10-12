@@ -5,7 +5,7 @@
   "min_delta": 0.0001,
   "width_mult": 0.25,
   "class_weighting": "inverse_frequency",
-  "augmentation": {"frequency_masks": 2, "frequency_width": 8, "time_masks": 2, "time_width": 10},
+  "augmentation": {"frequency_masks": 2, "frequency_width": 8, "time_masks": 2, "time_width": 10, "copies_per_sample": 2},
   "trials": [
     {"name": "adam_1e-3", "optimizer": "adam", "lr": 0.001, "batch_size": 128, "weight_decay": 0.0},
     {"name": "adam_3e-4", "optimizer": "adam", "lr": 0.0003, "batch_size": 64, "weight_decay": 0.0001},

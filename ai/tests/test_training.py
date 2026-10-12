@@ -17,6 +17,7 @@ import pandas as pd
 import torch
 
 from data import inspect_dataset, sha256, spec_augment
+from augment import inspect_augmented_dataset, prepare_augmented_dataset, validate_policy
 from experiment import seed_everything, write_json, atomic_write, save_checkpoint
 from metrics import metrics_from_confusion, run_epoch
 from models import build_model, DepthwiseSeparable, LeNet5, PartialC3
@@ -94,6 +95,75 @@ class TrainingTest(unittest.TestCase):
         expected = torch.nn.functional.cross_entropy(logits, labels, weight=weights).item()
         self.assertAlmostEqual(actual["loss"], expected, places=6)
 
+    def test_mask_axes_and_disabled_masking(self):
+        original = torch.ones(2, 1, 64, 101)
+        for axis, dimension in (("time", 2), ("frequency", 1)):
+            policy = {"time_masks": 0, "time_width": 0, "frequency_masks": 0, "frequency_width": 0}
+            policy.update({f"{axis}_masks": 1, f"{axis}_width": 8})
+            masked = spec_augment(original, policy, torch.Generator().manual_seed(42))
+            self.assertTrue(masked.eq(0).any())
+            # Toda la franja cubre el eje opuesto: columnas para tiempo, filas para frecuencia.
+            opposite = 1 if dimension == 2 else 2
+            self.assertTrue(torch.equal(masked[0, 0].eq(0).any(dim=opposite - 1),
+                                        masked[0, 0].eq(0).all(dim=opposite - 1)))
+        policy = {"time_masks": 1, "time_width": 0, "frequency_masks": 1, "frequency_width": 0}
+        self.assertTrue(torch.equal(original, spec_augment(original, policy, torch.Generator())))
+
+    def test_saved_augmented_dataset_lineage_and_integrity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            synthetic_dataset(root / "base")
+            source = inspect_dataset(root / "base")
+            policy = json.loads((AI_DIR / "configs/experiments.json").read_text())["augmentation"]
+            first = prepare_augmented_dataset(root / "augmented", source, policy, 1042, batch_size=5)
+            second = prepare_augmented_dataset(root / "repeat", source, policy, 1042, batch_size=7)
+            self.assertEqual(first["fingerprint"], second["fingerprint"])
+            self.assertEqual(inspect_dataset(root / "base")["fingerprint"], source["fingerprint"])
+            self.assertEqual(first["counts"], {**source["counts"], "train": 36})
+            original = np.load(root / "base/X_train.npy")
+            expanded = np.load(root / "augmented/X_train.npy")
+            np.testing.assert_array_equal(expanded[:12], original)
+            self.assertTrue(np.all(expanded[12:24] <= original))
+            self.assertTrue(np.all(expanded[24:] <= original))
+            self.assertTrue(np.all(np.any(expanded[12:24] != original, axis=(1, 2, 3))))
+            self.assertTrue(np.isfinite(expanded).all())
+            self.assertGreaterEqual(expanded.min(), 0)
+            self.assertLessEqual(expanded.max(), 1)
+            self.assertEqual(expanded.dtype, np.float32)
+            labels = np.load(root / "augmented/y_train.npy")
+            np.testing.assert_array_equal(labels, np.tile(np.load(root / "base/y_train.npy"), 3))
+            manifest = pd.read_csv(root / "augmented/manifest.csv")
+            self.assertEqual(set(manifest.split), {"train"})
+            self.assertTrue(manifest.groupby("source_tensor_index").size().eq(3).all())
+            for column in ("speaker", "audio_sha256", "file_sha256", "label_id"):
+                self.assertTrue(manifest.groupby("source_tensor_index")[column].nunique().eq(1).all())
+            self.assertFalse((root / "augmented/X_test.npy").exists())
+            self.assertFalse((root / "augmented/X_validation.npy").exists())
+            reused = prepare_augmented_dataset(root / "augmented", source, policy, 1042)
+            self.assertEqual(reused["fingerprint"], first["fingerprint"])
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                inspect_augmented_dataset(root / "augmented", source, policy, 42)
+            # Una exportación incompleta nunca se reutiliza ni se sobrescribe.
+            (root / "incomplete").mkdir()
+            with self.assertRaises(FileNotFoundError):
+                prepare_augmented_dataset(root / "incomplete", source, policy, 1042)
+            expanded[12, 0, 0, 0] = .123
+            np.save(root / "augmented/X_train.npy", expanded)
+            with self.assertRaisesRegex(ValueError, "modificado"):
+                inspect_augmented_dataset(root / "augmented", source, policy, 1042)
+
+    def test_augmentation_requires_an_active_technique(self):
+        policy = {"time_masks": 0, "time_width": 10, "frequency_masks": 0, "frequency_width": 8,
+                  "copies_per_sample": 2}
+        with self.assertRaisesRegex(ValueError, "activa"):
+            validate_policy(policy)
+        policy["time_masks"] = 1
+        validate_policy(policy)
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    validate_policy({**policy, "copies_per_sample": value})
+
     def test_repeatable_training_step(self):
         states = []
         for _ in range(2):
@@ -154,6 +224,12 @@ class TrainingTest(unittest.TestCase):
             suite = next((root / "runs").iterdir())
             frame = pd.read_csv(suite / "training_results.csv")
             self.assertEqual(len(frame), 12)
+            self.assertTrue(frame.loc[frame.variant.eq("base"), "training_samples"].eq(12).all())
+            self.assertTrue(frame.loc[frame.variant.eq("augmented"), "training_samples"].eq(36).all())
+            self.assertTrue(frame.original_training_samples.eq(12).all())
+            self.assertTrue(frame.loc[frame.variant.eq("augmented"), "optimizer_steps"].eq(9).all())
+            saved = json.loads((suite / "augmented_dataset.json").read_text())
+            self.assertEqual(saved["counts"]["train"], 36)
             self.assertEqual(len(json.loads((suite / "selection.json").read_text())["winners"]), 4)
             self.assertFalse((suite / "test_results.json").exists())
             self.assertEqual(len(list((suite / "wandb").glob("offline-run-*"))), 13)

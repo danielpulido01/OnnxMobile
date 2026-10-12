@@ -88,14 +88,17 @@ def spec_augment(batch, config, generator):
     """Time/frequency masking inspirado en SpecAugment; no time warping.
 
     RNG independiente: no altera orden de batches ni inicialización del modelo.
-    Aplicar en CPU, exclusivamente en la rutina de entrenamiento aumentado.
+    Aplicar en CPU, exclusivamente a ejemplos de entrenamiento.
+    Los anchos activos son positivos para evitar copias sin ninguna máscara.
     """
     result = batch.clone()
     for sample in result:
         for dimension, prefix in ((1, "frequency"), (2, "time")):
             maximum = min(config[f"{prefix}_width"], sample.shape[dimension] - 1)
+            if maximum == 0:
+                continue
             for _ in range(config[f"{prefix}_masks"]):
-                width = int(torch.randint(maximum + 1, (), generator=generator))
+                width = int(torch.randint(1, maximum + 1, (), generator=generator))
                 start = int(torch.randint(sample.shape[dimension] - width + 1, (), generator=generator))
                 slices = [slice(None)] * 3
                 slices[dimension] = slice(start, start + width)

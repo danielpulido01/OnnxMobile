@@ -54,8 +54,36 @@ no está disponible. Registrar la versión exacta de la rueda con el experimento
 Usar una exportación con `COMPLETED.json` y once clases. Por ejemplo:
 
 ```powershell
-.\.venv\Scripts\python.exe ai/src/train.py --data ai/data/processed/speech_commands/20261008T020826106877Z --suite ai/runs/speech_commands --project onnxmobile-speech-commands --watch
+.\.venv\Scripts\python.exe ai/src/train.py --data ai/data/processed/speech_commands/20261008T020826106877Z --suite ai/runs/speech_commands_augmented_v1 --project onnxmobile-speech-commands --watch
 ```
+
+La primera invocación prepara los dos datasets, sin modificar el original. Por
+defecto crea una carpeta hermana con sufijo `-augmented`, verificada y reutilizada
+en las siguientes sesiones. Para generarla **sin iniciar ningún entrenamiento**:
+
+```powershell
+.\.venv\Scripts\python.exe ai/src/augment.py --data ai/data/processed/speech_commands/20261008T020826106877Z
+```
+
+`--output RUTA` permite otra ubicación al exportar; indicar esa misma carpeta con
+`train.py --augmented-data RUTA` al crear la suite. La suite recuerda ambas rutas.
+Se usa `augmentation` de `experiments.json` y la semilla de la suite + 1000;
+ambos scripts aceptan `--config` para una política diferente. Una exportación
+existente solo se reutiliza si coinciden origen, política, semilla y hashes;
+no se sobrescribe. Para otra política, elegir otra carpeta y una suite nueva.
+
+Con `copies_per_sample: 2`, train base conserva **83.150** ejemplos y train
+aumentado guarda **249.450**: originales más dos copias con time masking y
+frequency masking. El ejemplo de 100 → 300 se refiere solo a entrenamiento.
+Validation (**9.962**) y test (**10.730**) son los mismos archivos originales
+para todos los modelos. Los nuevos tensores ocupan unos **6,45 GB** adicionales.
+No se generan nuevos WAV: las técnicas se aplican al espectrograma log-Mel.
+
+La carpeta aumentada contiene `X_train.npy`, `y_train.npy`, `manifest.csv`,
+`augmentation.json`, `preview.png` y `COMPLETED.json`. El manifiesto registra
+`source_tensor_index`, `augmentation_copy` (0 = original) y `technique`, además
+de hablante, clase y hashes del audio fuente. No contiene copias de validation/test:
+se leen del dataset original indicado en `augmentation.json`.
 
 Agregar `--entity NOMBRE_EQUIPO` si aplica. Este comando ejecuta **un solo trial**,
 de hasta 30 épocas, con validación y early stopping. La misma carpeta `--suite`
@@ -68,7 +96,7 @@ usar el mismo entorno y particiones durante toda la suite.
 Para continuar o iniciar el siguiente trial, basta repetir:
 
 ```powershell
-.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands --watch
+.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands_augmented_v1 --watch
 ```
 
 Se infieren los datos, configuración, proyecto, entidad, dispositivo y modo W&B
@@ -76,8 +104,8 @@ de la suite. Los trials completos se conservan y no se vuelven a entrenar.
 Para consultar el estado sin entrenar ni conectar W&B, o elegir un trial:
 
 ```powershell
-.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands --list
-.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands --experiment mobilenet_v1-augmented-adam_1e-3 --watch
+.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands_augmented_v1 --list
+.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands_augmented_v1 --experiment mobilenet_v1-augmented-adam_1e-3 --watch
 ```
 
 `--list` muestra `complete`, `resumable` o `pending`. Seleccionar un trial completo
@@ -121,7 +149,7 @@ CPU PyTorch, batch=1; no equivale a rendimiento móvil ni incluye preprocesamien
 
 | Archivo | Contenido |
 | --- | --- |
-| `suite.json`, `dataset.json` | Configuración, identidad de código/datos y hashes |
+| `suite.json`, `dataset.json`, `augmented_dataset.json` | Configuración, identidad de código y de ambos datasets, rutas y hashes |
 | `<experimento>/config.json` | Hiperparámetros explícitos |
 | `<experimento>/environment.json`, `requirements-lock.txt` | Entorno y versiones |
 | `<experimento>/architecture.txt` | Capas del modelo real |
@@ -135,16 +163,25 @@ CPU PyTorch, batch=1; no equivale a rendimiento móvil ni incluye preprocesamien
 | `test_results.csv`, `test_results.json`, `report.md` | Comparación e insumos para el informe |
 | `wandb/` | Eventos locales del SDK de W&B |
 
-La vista aumentada se genera durante train, con política y RNG propios. No ocupa
-una copia completa del dataset; se reconstruye con los tensores originales,
-la semilla, la configuración y el código guardados. Validación y test son comunes
-a las dos variantes, lo que permite una comparación sin fuga de versiones del
-mismo audio a otras particiones.
+Los trials `base` leen el train original; los `augmented` leen el train expandido
+guardado, sin aplicar máscaras adicionales durante la época. `train_clean`
+siempre evalúa únicamente los originales. Validación y test son comunes a las
+dos variantes, sin fuga de copias del mismo audio a otras particiones.
+La tabla registra `training_samples`, `original_training_samples` y
+`optimizer_steps`. Con igual límite de épocas el dataset aumentado permite más
+pasos de optimización: el informe explicita este presupuesto y muestra diferencias
+de macro-F1 por arquitectura con los mismos hiperparámetros, además del test de
+los ganadores. Un delta positivo indica mejora y uno negativo deterioro en esa
+ejecución; no demuestra significancia estadística.
+
+Las suites anteriores usaban aumento dinámico y no son compatibles con este
+protocolo de exportación fija. Conservarlas y usar una carpeta `--suite` nueva;
+los controles de identidad impiden mezclar sus checkpoints con los nuevos.
 
 ## Checkpoints, pausas y recuperación
 
 ```powershell
-.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands --epochs-per-run 5 --watch
+.\.venv\Scripts\python.exe ai/src/train.py --suite ai/runs/speech_commands_augmented_v1 --epochs-per-run 5 --watch
 ```
 
 Esto ejecuta hasta cinco épocas adicionales de un trial, guarda su progreso y

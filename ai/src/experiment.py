@@ -151,6 +151,10 @@ def log_provenance(run, dataset, directory):
         artifact.add_file(str(Path(dataset["root"]) / filename), name=filename)
     write_json(directory / "dataset.json", dataset)
     artifact.add_file(str(directory / "dataset.json"))
+    if "augmented" in dataset:
+        augmented = dataset["augmented"]
+        for filename in ("manifest.csv", "augmentation.json", "COMPLETED.json", "preview.png"):
+            artifact.add_file(str(Path(augmented["root"]) / filename), name=f"augmented/{filename}")
     run.log_artifact(artifact)
     source = wandb.Artifact(f"training-source-{source_fingerprint()[:12]}", type="source")
     for path in sorted((AI_DIR / "src").glob("*.py")):

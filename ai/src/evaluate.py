@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 import wandb
 
+from augment import inspect_augmented_dataset
 from data import inspect_dataset, make_loader, sha256, SpectrogramDataset
 from experiment import log_class_metrics, profile_model, seed_everything, source_fingerprint, write_json
 from metrics import run_epoch
@@ -40,6 +41,19 @@ def write_report(suite, selection, tests):
         pair = {r["variant"]: r for r in tests if r["architecture"] == architecture}
         delta = pair["augmented"]["macro_f1"] - pair["base"]["macro_f1"]
         lines.append(f"- {architecture}: Δ macro-F1 = {delta:+.4f}.")
+    lines += ["", "## Comparación con los mismos hiperparámetros (validación)", "",
+              "| Arquitectura | Trial | Train base | Train aumentado | Δ macro-F1 aumentado − base |",
+              "| --- | --- | ---: | ---: | ---: |"]
+    for (architecture, trial), group in training.groupby(["architecture", "trial"]):
+        pair = group.set_index("variant")
+        base, augmented = pair.loc["base"], pair.loc["augmented"]
+        delta = augmented.best_validation_macro_f1 - base.best_validation_macro_f1
+        lines.append(f"| {architecture} | {trial} | {base.training_samples} | {augmented.training_samples} | {delta:+.4f} |")
+    lines += ["", "El conjunto aumentado incluye originales y copias fijas con máscaras. Con el mismo límite de "
+              "épocas recorre más ejemplos y realiza más pasos de optimización; training_results.csv registra "
+              "training_samples y optimizer_steps. Esta comparación mide la receta completa de aumento, "
+              "sin aislar su efecto del presupuesto de cómputo. Los ganadores en test pueden usar distintos "
+              "hiperparámetros elegidos exclusivamente por validación."]
     lines += ["", "## Evidencia de ajuste y límites", ""]
     for r in training.to_dict("records"):
         history = pd.read_csv(suite / r["experiment"] / "history.csv")
@@ -95,6 +109,11 @@ def main():
     dataset = inspect_dataset(dataset_saved["root"])
     if dataset["fingerprint"] != identity["dataset_fingerprint"]:
         raise ValueError("El dataset cambió desde entrenamiento")
+    augmented_saved = json.loads((suite / "augmented_dataset.json").read_text(encoding="utf-8"))
+    augmented = inspect_augmented_dataset(augmented_saved["root"], dataset, identity["config"]["augmentation"],
+                                          identity["config"]["seed"] + 1000)
+    if augmented["fingerprint"] != identity["augmented_dataset_fingerprint"]:
+        raise ValueError("El dataset aumentado cambió desde entrenamiento")
     device = torch.device(args.device)
     seed_everything(identity["config"]["seed"], identity["threads"])
     classes = dataset["metadata"]["classes"]
@@ -115,6 +134,9 @@ def main():
         if checkpoint["dataset_fingerprint"] != dataset["fingerprint"] or checkpoint["classes"] != classes:
             raise ValueError("Checkpoint incompatible con dataset")
         config = checkpoint["config"]
+        training_dataset = augmented if config["variant"] == "augmented" else dataset
+        if checkpoint["training_dataset_fingerprint"] != training_dataset["fingerprint"]:
+            raise ValueError("Checkpoint incompatible con dataset de entrenamiento")
         model = build_model(config["architecture"], len(classes), config["width_mult"]).to(device)
         model.load_state_dict(checkpoint["state_dict"])
         loader = make_loader(SpectrogramDataset(dataset["root"], "test"), config["batch_size"], config["seed"])

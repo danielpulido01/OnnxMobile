@@ -85,12 +85,19 @@ medidas de eficiencia; probar ONNX en el teléfono es una etapa posterior.
 
 El notebook genera log-Mel 64×101×1 a partir de audio mono 16 kHz de un segundo.
 Los tensores son float32 en [0,1]; no se vuelven a comprimir leyendo PNG.
-Las dos variantes usan **exactamente los mismos IDs y particiones** de hablantes.
-Base entrega el tensor original. Aumentado entrega una vista estocástica nueva
-durante cada época: dos máscaras de frecuencia de ancho uniforme entre 0 y 8
-bandas, y dos de tiempo de ancho entre 0 y 10 frames. El inicio es uniforme entre
-posiciones válidas. Cero representa el piso espectral de −80 dB respecto al
-máximo del clip. No se generan variantes aumentadas de validación o test.
+Las dos variantes conservan **exactamente las mismas particiones** de hablantes.
+Base entrega los N tensores originales. Aumentado entrega un train separado de
+3N tensores: los N originales más dos copias independientes por ejemplo, guardadas
+una sola vez. Cada copia recibe dos máscaras de frecuencia de ancho uniforme
+entre 1 y 8 bandas y dos de tiempo entre 1 y 10 frames. El inicio es uniforme entre
+posiciones válidas. La política está en `augmentation` de `experiments.json`;
+`copies_per_sample: 2` fija el crecimiento a 3×. Cero representa el piso espectral
+de −80 dB respecto al máximo del clip. No se generan variantes de validación/test.
+
+En el espectrograma el eje horizontal es tiempo, el vertical es frecuencia Mel,
+y la intensidad/color representa energía normalizada. Time masking borra franjas
+verticales y frequency masking franjas horizontales. Time warping deformaría el
+eje temporal del espectrograma; no es un cambio directo del eje de frecuencias.
 
 Referencia: Park et al. (2019),
 [SpecAugment: A Simple Data Augmentation Method for Automatic Speech Recognition](https://arxiv.org/abs/1904.08779).
@@ -99,8 +106,11 @@ son una política moderada propia para clips de un segundo, no una reproducción
 de las políticas de ASR del artículo. El supuesto es que borrar una región local
 conserva suficiente evidencia de la palabra y reduce dependencia de posiciones
 concretas. Debe comprobarse comparando base/aumentado y errores por clase.
-Se guardan política, semilla, huella de datos y código: permiten reconstruir la
-vista aumentada sin duplicar varios GB de tensores.
+Se guardan tensores, etiquetas, política, semilla, hashes, código del generador,
+un manifiesto con el índice original de cada copia y `preview.png`. Cada trial
+aumentado lee exactamente la misma exportación, sin volver a enmascararla.
+Con N=83.150, train aumentado tiene 249.450 ejemplos; el tensor ocupa unos 6,45 GB
+adicionales. El dataset original permanece disponible para entrenar la base.
 
 ## Pérdida, optimización y doce experimentos
 
@@ -125,6 +135,11 @@ Máximo 30 épocas; early stopping tras siete épocas sin mejora de macro-F1 may
 que 0,0001. Cada mejora estricta de macro-F1 guarda el checkpoint; un empate usa
 menor loss. La tolerancia solo controla paciencia, no descarta el mejor modelo.
 No se usan schedulers ocultos ni ajustes después de observar test.
+Al mantener épocas y batch size, train aumentado implica aproximadamente tres
+veces más pasos por época. Se registran `training_samples` y `optimizer_steps`;
+la comparación mide el aumento junto con ese presupuesto adicional, sin aislarlos.
+El informe muestra también diferencias de validación entre trials con los mismos
+hiperparámetros, además de los ganadores seleccionados para test.
 
 Primero se muestran las doce curvas/tablas de train/validación. Se elige un
 ganador por combinación mediante macro-F1 de validación, menor loss y nombre.
