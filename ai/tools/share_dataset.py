@@ -16,6 +16,8 @@ CHUNK = 1024 * 1024
 RELEASE_LIMIT = 2 * 1024**3
 REQUIRED = [f"{prefix}_{split}.npy" for split in ("train", "validation", "test") for prefix in ("X", "y")]
 REQUIRED += ["manifest.csv", "preprocessing.json", "COMPLETED.json"]
+AUGMENTED_REQUIRED = ["X_train.npy", "y_train.npy", "manifest.csv", "augmentation.json",
+                      "preview.png", "COMPLETED.json"]
 OPTIONAL = ["audio_audit.csv", "inventory.csv", "split_counts.csv", "unknown_word_counts.csv",
             "requirements-lock.txt", "summary.ipynb", "summary.md"]  # summary.md: exportaciones anteriores.
 
@@ -38,13 +40,23 @@ def write_json(path, value):
 
 def pack(data, output, original):
     data, output, original = data.resolve(), output.resolve(), original.resolve()
-    for name in REQUIRED:
+    augmented = (data / "augmentation.json").is_file()
+    required = AUGMENTED_REQUIRED if augmented else REQUIRED
+    for name in required:
         if not (data / name).is_file():
             raise ValueError(f"Missing required file: {name}")
     completion = read_json(data / "COMPLETED.json")
-    if digest(data / "manifest.csv") != completion["manifest_sha256"]:
+    if augmented:
+        expected_hashes = completion["hashes"]
+        for name in AUGMENTED_REQUIRED[:-1]:
+            if digest(data / name) != expected_hashes.get(name):
+                raise ValueError(f"Augmented file does not match COMPLETED.json: {name}")
+    elif digest(data / "manifest.csv") != completion["manifest_sha256"]:
         raise ValueError("Manifest does not match COMPLETED.json")
-    metadata = read_json(data / "preprocessing.json")
+    metadata = read_json(data / ("augmentation.json" if augmented else "preprocessing.json"))
+    if augmented and (metadata["format"] != "onnxmobile-augmented-train-v1"
+                      or metadata["counts"] != completion["counts"]):
+        raise ValueError("Incompatible augmented dataset metadata")
     for name in ("LICENSE", "README.md"):
         if not (original / name).is_file():
             raise ValueError(f"Missing original attribution file: {original / name}")
@@ -53,7 +65,7 @@ def pack(data, output, original):
     manifest_path = output / f"speech-commands-{data.name}.bundle.json"
     if archive.exists() or manifest_path.exists():
         raise ValueError("Bundle already exists; use another output folder to preserve it")
-    files = {name: data / name for name in REQUIRED + OPTIONAL if (data / name).is_file()}
+    files = {name: data / name for name in required + OPTIONAL if (data / name).is_file()}
     files.update({"LICENSE.original": original / "LICENSE", "README.original.md": original / "README.md"})
     attribution = output / "ATTRIBUTION.md"
     attribution.write_text(
@@ -66,10 +78,13 @@ def pack(data, output, original):
         "https://creativecommons.org/licenses/by/4.0/\n\n"
         "Derived by the OnnxMobile team: invalid/silent/duplicate audio removed, official speaker-disjoint "
         "partitions retained, ten commands plus unknown, mono 16 kHz one-second audio converted to "
-        "64x101 single-channel float32 log-Mel spectrograms normalized to [0,1].\n"
-        "This is a processed derivative, not the original WAV corpus.\n"
-        "The original license and README are included unchanged.\n"
-        "Exact processing parameters and provenance are in preprocessing.json; examples are indexed in manifest.csv.\n",
+        "64x101 single-channel float32 log-Mel spectrograms normalized to [0,1].\n" +
+        ("Training contains the originals and fixed SpecAugment copies; policy, seed and source identity "
+         "are recorded in augmentation.json. Validation/test come from the separate base dataset.\n"
+         if augmented else "This is a processed derivative, not the original WAV corpus.\n") +
+        "The original license and README are included unchanged.\n" +
+        f"Exact processing parameters and provenance are in {'augmentation.json' if augmented else 'preprocessing.json'}; "
+        "examples are indexed in manifest.csv.\n",
         encoding="utf-8")
     files[attribution.name] = attribution
     records = []
@@ -85,6 +100,8 @@ def pack(data, output, original):
                     size += len(block)
                     outgoing.write(block)
             records.append({"path": relative, "size": size, "sha256": checksum.hexdigest()})
+            if augmented and name in expected_hashes and checksum.hexdigest() != expected_hashes[name]:
+                raise ValueError(f"Augmented file changed while packing: {name}")
     parts = []
     if archive.stat().st_size < RELEASE_LIMIT:
         parts.append(archive)
@@ -104,7 +121,7 @@ def pack(data, output, original):
                         remaining -= len(block)
                 parts.append(part)
                 number += 1
-    manifest = {"format": "onnxmobile-dataset-bundle-v1", "dataset": data.name,
+    manifest = {"format": ("onnxmobile-augmented-bundle-v1" if augmented else "onnxmobile-dataset-bundle-v1"), "dataset": data.name,
                 "classes": metadata["classes"], "counts": completion["counts"],
                 "layout": "NHWC", "image_shape": metadata["image_shape"],
                 "archive_sha256": digest(archive), "archive_size": archive.stat().st_size,
@@ -118,7 +135,7 @@ def pack(data, output, original):
 def load_bundle(path):
     path = path.resolve()
     manifest = read_json(path)
-    if manifest["format"] != "onnxmobile-dataset-bundle-v1":
+    if manifest["format"] not in ("onnxmobile-dataset-bundle-v1", "onnxmobile-augmented-bundle-v1"):
         raise ValueError("Unsupported bundle format")
     dataset = manifest["dataset"]
     if not dataset or PurePosixPath(dataset).name != dataset or "\\" in dataset or dataset in (".", ".."):
@@ -137,7 +154,8 @@ def load_bundle(path):
         if (len(member.parts) != 2 or member.parts[0] != dataset or member.name in (".", "..")
                 or member.is_absolute() or "\\" in record["path"] or ":" in record["path"]):
             raise ValueError("Unsafe archive member")
-    required_paths = {f"{dataset}/{name}" for name in REQUIRED}
+    required = AUGMENTED_REQUIRED if manifest["format"] == "onnxmobile-augmented-bundle-v1" else REQUIRED
+    required_paths = {f"{dataset}/{name}" for name in required}
     if not required_paths.issubset({record["path"] for record in manifest["files"]}):
         raise ValueError("Bundle is missing training files")
     return manifest

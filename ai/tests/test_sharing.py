@@ -28,6 +28,7 @@ class SharingTests(unittest.TestCase):
             "counts": {"train": 1, "validation": 1, "test": 1},
             "manifest_sha256": sharing.digest(self.data / "manifest.csv")})
         original = self.root / "original"
+        self.original = original
         original.mkdir()
         (original / "LICENSE").write_text("Synthetic license fixture", encoding="utf-8")
         (original / "README.md").write_text("Synthetic attribution fixture", encoding="utf-8")
@@ -53,6 +54,37 @@ class SharingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete or modified"):
             sharing.verify_or_unpack(self.manifest, self.root / "restored")
         self.assertFalse((self.root / "restored").exists())
+
+    def augmented_fixture(self):
+        data = self.root / "fixture-augmented"
+        data.mkdir()
+        for name in sharing.AUGMENTED_REQUIRED:
+            (data / name).write_bytes(b"synthetic augmented fixture: " + name.encode())
+        metadata = {"format": "onnxmobile-augmented-train-v1", "classes": ["yes"],
+                    "image_shape": [64, 101, 1], "counts": {"train": 3, "validation": 1, "test": 1},
+                    "source_root": "D:/original-laptop/base", "source_fingerprint": "fixture-base-identity"}
+        sharing.write_json(data / "augmentation.json", metadata)
+        sharing.write_json(data / "COMPLETED.json", {
+            "counts": metadata["counts"],
+            "hashes": {name: sharing.digest(data / name) for name in sharing.AUGMENTED_REQUIRED[:-1]}})
+        return data
+
+    def test_augmented_round_trip_preserves_identity_and_shares_base_eval(self):
+        data = self.augmented_fixture()
+        manifest = sharing.pack(data, self.root / "augmented-bundle", self.original)
+        sharing.verify_or_unpack(manifest, self.root / "restored")
+        restored = self.root / "restored" / data.name
+        for name in sharing.AUGMENTED_REQUIRED:
+            self.assertEqual((data / name).read_bytes(), (restored / name).read_bytes())
+        self.assertFalse((restored / "X_test.npy").exists())
+        self.assertFalse((restored / "X_validation.npy").exists())
+
+    def test_modified_augmented_export_rejected_before_packing(self):
+        data = self.augmented_fixture()
+        (data / "X_train.npy").write_bytes(b"modified after completion")
+        with self.assertRaisesRegex(ValueError, "does not match COMPLETED.json"):
+            sharing.pack(data, self.root / "augmented-bundle", self.original)
+        self.assertFalse((self.root / "augmented-bundle").exists())
 
     def test_unsafe_member_rejected(self):
         manifest = sharing.read_json(self.manifest)
