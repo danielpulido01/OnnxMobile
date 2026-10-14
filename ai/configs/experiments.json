@@ -4,11 +4,12 @@
   "patience": 7,
   "min_delta": 0.0001,
   "width_mult": 0.25,
-  "class_weighting": "inverse_frequency",
+  "class_weighting": "none",
+  "sampling": {"strategy": "controlled", "unknown_fraction": 0.2},
   "augmentation": {"frequency_masks": 2, "frequency_width": 8, "time_masks": 2, "time_width": 10, "copies_per_sample": 2},
   "trials": [
-    {"name": "adam_1e-3", "optimizer": "adam", "lr": 0.001, "batch_size": 128, "weight_decay": 0.0},
-    {"name": "adam_3e-4", "optimizer": "adam", "lr": 0.0003, "batch_size": 64, "weight_decay": 0.0001},
-    {"name": "sgd_1e-2", "optimizer": "sgd", "lr": 0.01, "batch_size": 128, "weight_decay": 0.0001, "momentum": 0.9}
+    {"name": "adam_b32_e15", "optimizer": "adam", "lr": 0.001, "batch_size": 32, "epochs": 15, "patience": 4, "weight_decay": 0.0},
+    {"name": "adam_b64_e30", "optimizer": "adam", "lr": 0.0003, "batch_size": 64, "epochs": 30, "patience": 7, "weight_decay": 0.0001},
+    {"name": "sgd_b128_e45", "optimizer": "sgd", "lr": 0.02, "batch_size": 128, "epochs": 45, "patience": 10, "weight_decay": 0.0005, "momentum": 0.95}
   ]
 }

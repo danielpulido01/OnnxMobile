@@ -80,6 +80,11 @@ class NotebookTest(unittest.TestCase):
                 self.assertTrue(manifest.image_path.is_unique)
                 self.assertEqual(namespace["CLASSES"], commands + ["unknown"])
                 self.assertEqual(namespace["LABEL_TO_ID"]["unknown"], 10)
+                summary_path = namespace["RUN_DIR"] / "summary.ipynb"
+                summary_notebook = nbformat.read(summary_path, as_version=4)
+                nbformat.validate(summary_notebook)
+                self.assertEqual(summary_notebook.cells[0].source, namespace["summary"])
+                self.assertFalse((namespace["RUN_DIR"] / "summary.md").exists())
                 unknown = manifest.loc[manifest.label.eq("unknown")]
                 self.assertEqual(set(unknown.source_label), {"bed", "cat"})
                 self.assertEqual(len(unknown), 12)

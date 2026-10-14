@@ -22,6 +22,8 @@ class SharingTests(unittest.TestCase):
         for name in sharing.REQUIRED:
             (self.data / name).write_bytes(b"small synthetic fixture: " + name.encode())
         sharing.write_json(self.data / "preprocessing.json", {"classes": ["yes"], "image_shape": [64, 101, 1]})
+        sharing.write_json(self.data / "summary.ipynb", {
+            "nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": []})
         sharing.write_json(self.data / "COMPLETED.json", {
             "counts": {"train": 1, "validation": 1, "test": 1},
             "manifest_sha256": sharing.digest(self.data / "manifest.csv")})
@@ -38,7 +40,7 @@ class SharingTests(unittest.TestCase):
         sharing.verify_or_unpack(self.manifest)
         destination = self.root / "restored"
         sharing.verify_or_unpack(self.manifest, destination)
-        for name in sharing.REQUIRED:
+        for name in sharing.REQUIRED + ["summary.ipynb"]:
             self.assertEqual((self.data / name).read_bytes(), (destination / "fixture" / name).read_bytes())
         with self.assertRaisesRegex(ValueError, "will not be overwritten"):
             sharing.verify_or_unpack(self.manifest, destination)

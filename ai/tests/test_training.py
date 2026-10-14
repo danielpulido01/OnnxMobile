@@ -16,21 +16,24 @@ import numpy as np
 import pandas as pd
 import torch
 
-from data import inspect_dataset, sha256, spec_augment
+from data import inspect_dataset, sha256, spec_augment, SpectrogramDataset
 from augment import inspect_augmented_dataset, prepare_augmented_dataset, validate_policy
-from experiment import seed_everything, write_json, atomic_write, save_checkpoint
+from experiment import seed_everything, write_json, atomic_write, save_checkpoint, capture_rng, restore_rng
 from metrics import metrics_from_confusion, run_epoch
 from models import build_model, DepthwiseSeparable, LeNet5, PartialC3
 from train import experiment_grid, select_winners
+from sampling import make_training_loader
 
 
-def synthetic_dataset(root):
+def synthetic_dataset(root, extra_unknown=0):
     root.mkdir()
     rng = np.random.default_rng(123)
     classes = ["yes", "no", "unknown"]
     rows, counts = [], {}
     for split, per_class in (("train", 4), ("validation", 2), ("test", 2)):
         labels = np.tile(np.arange(3, dtype=np.int64), per_class)
+        if split == "train":
+            labels = np.concatenate([labels, np.full(extra_unknown, 2, dtype=np.int64)])
         features = rng.random((len(labels), 64, 101, 1), dtype=np.float32)
         np.save(root / f"X_{split}.npy", features)
         np.save(root / f"y_{split}.npy", labels)
@@ -38,6 +41,7 @@ def synthetic_dataset(root):
         for i, label in enumerate(labels):
             rows.append({"split": split, "tensor_index": i, "label_id": int(label),
                          "label": classes[label], "speaker": f"{split}-{i}",
+                         "source_label": ("bed" if i % 2 else "cat") if label == 2 else classes[label],
                          "file_sha256": f"file-{split}-{i}", "audio_sha256": f"audio-{split}-{i}"})
     pd.DataFrame(rows).to_csv(root / "manifest.csv", index=False)
     write_json(root / "preprocessing.json", {"classes": classes, "label_to_id": {c: i for i, c in enumerate(classes)},
@@ -94,6 +98,109 @@ class TrainingTest(unittest.TestCase):
         actual, _ = run_epoch(model, [(logits[:2], labels[:2]), (logits[2:], labels[2:])], weights, torch.device("cpu"))
         expected = torch.nn.functional.cross_entropy(logits, labels, weight=weights).item()
         self.assertAlmostEqual(actual["loss"], expected, places=6)
+
+    def test_controlled_sampling_quotas_diversity_and_resume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            synthetic_dataset(root, extra_unknown=36)
+            dataset = SpectrogramDataset(root, "train")
+            classes = ["yes", "no", "unknown"]
+            config = {"sampling": {"strategy": "controlled", "unknown_fraction": .2},
+                      "class_weighting": "none", "batch_size": 4, "seed": 42}
+            loader = make_training_loader(dataset, classes, config)
+            first = list(loader.sampler)
+            np.testing.assert_array_equal(np.bincount(dataset.y[first]), [4, 4, 2])
+            self.assertEqual(len(set(first)), 10)
+            self.assertTrue(set(range(12)) - {2, 5, 8, 11} <= set(first))
+            self.assertEqual(loader.sampler.summary()["unknown_word_quotas"], {"bed": 1, "cat": 1})
+            fresh = make_training_loader(dataset, classes, config)
+            self.assertEqual(first, list(fresh.sampler))
+            augmentation = torch.Generator().manual_seed(1042)
+            saved = capture_rng(augmentation, [loader])
+            second = list(loader.sampler)
+            self.assertNotEqual(first, second)
+            self.assertNotEqual(set(first) & set(np.flatnonzero(dataset.y == 2)),
+                                set(second) & set(np.flatnonzero(dataset.y == 2)))
+            restore_rng(saved, augmentation, [fresh])
+            self.assertEqual(second, list(fresh.sampler))
+            before = sha256(root / "y_validation.npy")
+            with self.assertRaisesRegex(ValueError, "solo.*train"):
+                make_training_loader(SpectrogramDataset(root, "validation"), classes, config)
+            self.assertEqual(before, sha256(root / "y_validation.npy"))
+            legacy = make_training_loader(dataset, classes, {**config, "sampling": {"strategy": "none"}})
+            self.assertEqual(len(list(legacy.sampler)), len(dataset))
+
+    def test_controlled_sampling_repeats_only_after_command_pool_exhaustion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            synthetic_dataset(root, extra_unknown=36)
+            labels = np.load(root / "y_train.npy")
+            labels[0] = 1  # yes=3, no=5: completar cada comando hasta cinco.
+            np.save(root / "y_train.npy", labels)
+            manifest = pd.read_csv(root / "manifest.csv")
+            manifest.loc[manifest.split.eq("train") & manifest.tensor_index.eq(0), "label_id"] = 1
+            manifest.to_csv(root / "manifest.csv", index=False)
+            dataset = SpectrogramDataset(root, "train")
+            config = {"sampling": {"strategy": "controlled", "unknown_fraction": .2},
+                      "class_weighting": "none", "batch_size": 4, "seed": 42}
+            loader = make_training_loader(dataset, ["yes", "no", "unknown"], config)
+            indices = np.array(list(loader.sampler))
+            np.testing.assert_array_equal(np.bincount(labels[indices]), [5, 5, 2])
+            yes_indices = indices[labels[indices] == 0]
+            self.assertEqual(set(yes_indices), set(np.flatnonzero(labels == 0)))
+            self.assertLessEqual(np.unique(yes_indices, return_counts=True)[1].max(), 2)
+
+    def test_invalid_sampling_and_double_correction_rejected(self):
+        original = json.loads((AI_DIR / "configs/experiments.json").read_text())
+        for fraction in (0, 1, -.2, True, float("nan"), float("inf")):
+            with self.subTest(fraction=fraction):
+                config = copy.deepcopy(original)
+                config["trials"][0]["sampling"] = {"strategy": "controlled", "unknown_fraction": fraction}
+                with self.assertRaisesRegex(ValueError, "unknown_fraction"):
+                    experiment_grid(config)
+        original["trials"][0]["class_weighting"] = "inverse_frequency"
+        with self.assertRaisesRegex(ValueError, "doble corrección"):
+            experiment_grid(original)
+
+    def test_notebook_sampling_preview_and_error_diagnostics(self):
+        import nbformat
+        import matplotlib.pyplot as plt
+        notebook = nbformat.read(AI_DIR / "notebooks/02_entrenamiento_evaluacion.ipynb", as_version=4)
+        nbformat.validate(notebook)
+        markdown = "\n".join(c.source for c in notebook.cells if c.cell_type == "markdown")
+        self.assertIn("Gradient-Based Learning Applied to Document Recognition", markdown)
+        self.assertIn("Instalar y conectar W&B", markdown)
+        self.assertIn("Checkpoints, pausas y recuperación", markdown)
+        self.assertIn("muestreo controlado", markdown)
+        self.assertNotIn("architectures.md", markdown)
+        self.assertNotIn("training.md", markdown)
+        for cell in notebook.cells:
+            if cell.cell_type == "code":
+                compile(cell.source, f"notebook:{cell.id}", "exec")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            synthetic_dataset(root / "data", extra_unknown=36)
+            config = json.loads((AI_DIR / "configs/experiments.json").read_text())
+            grid = experiment_grid(config)
+            namespace = {"json": json, "pd": pd, "display": lambda *args: None,
+                         "DATA_DIR": root / "data", "AUGMENTED_DIR": root / "data",
+                         "SUITE": root / "suite", "grid": grid}
+            cells = {cell.id: cell for cell in notebook.cells}
+            try:
+                exec(cells["controlled-sampling-preview"].source, namespace)
+                self.assertEqual(namespace["sampling_preview"].base_por_epoca.tolist(), [4, 4, 2])
+                target = root / "suite" / grid[0]["experiment"]
+                target.mkdir(parents=True)
+                np.savetxt(target / "validation_best_confusion.csv",
+                           [[2, 0, 1], [0, 3, 0], [1, 1, 2]], delimiter=",", fmt="%d")
+                exec(cells["unknown-errors-diagnostics"].source, namespace)
+                self.assertEqual(len(namespace["error_rows"]), 1)
+                result = namespace["error_rows"][0]
+                self.assertEqual(result["split"], "validation")
+                self.assertEqual(result["unknown_to_command"], .5)
+                self.assertEqual(result["command_to_unknown"], 1 / 6)
+            finally:
+                plt.close("all")
 
     def test_mask_axes_and_disabled_masking(self):
         original = torch.ones(2, 1, 64, 101)
@@ -197,13 +304,44 @@ class TrainingTest(unittest.TestCase):
                     "test_macro_f1": 1 - i % 3 / 10} for i, c in enumerate(grid)]
         winners = select_winners(results)
         self.assertEqual(len(winners), 4)
-        self.assertTrue(all(w["name"] == "sgd_1e-2" for w in winners.values()))
+        self.assertTrue(all(w["name"] == config["trials"][-1]["name"] for w in winners.values()))
         config["trials"][1] = {**config["trials"][0], "name": "duplicate"}
         with self.assertRaisesRegex(ValueError, "diferentes"):
             experiment_grid(config)
 
+    def test_trial_budgets_and_matched_dataset_settings(self):
+        config = json.loads((AI_DIR / "configs/experiments.json").read_text())
+        grid = experiment_grid(config)
+        self.assertEqual({c["batch_size"] for c in grid}, {32, 64, 128})
+        self.assertEqual({c["epochs"] for c in grid}, {15, 30, 45})
+        for architecture in ("lenet5", "mobilenet_v1"):
+            for trial in config["trials"]:
+                pair = [c for c in grid if c["architecture"] == architecture and c["name"] == trial["name"]]
+                self.assertEqual({c["variant"] for c in pair}, {"base", "augmented"})
+                self.assertEqual({c["epochs"] for c in pair}, {trial["epochs"]})
+                self.assertEqual({c["patience"] for c in pair}, {trial["patience"]})
+                self.assertEqual({k: v for k, v in pair[0].items() if k not in ("variant", "experiment")},
+                                 {k: v for k, v in pair[1].items() if k not in ("variant", "experiment")})
+        # Los trials sin overrides siguen heredando el presupuesto global.
+        del config["trials"][0]["epochs"], config["trials"][0]["patience"]
+        inherited = experiment_grid(config)[0]
+        self.assertEqual(inherited["epochs"], config["epochs"])
+        self.assertEqual(inherited["patience"], config["patience"])
+
+    def test_invalid_trial_overrides_rejected(self):
+        original = json.loads((AI_DIR / "configs/experiments.json").read_text())
+        cases = (("epochs", 0), ("epochs", 1.5), ("patience", -1), ("patience", True),
+                 ("batch_size", 1), ("batch_size", 32.5), ("lr", 0), ("lr", float("nan")),
+                 ("weight_decay", -1), ("min_delta", float("inf")), ("momentum", 1.1))
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                config = copy.deepcopy(original)
+                config["trials"][-1][key] = value
+                with self.assertRaisesRegex(ValueError, key):
+                    experiment_grid(config)
+
     def test_full_offline_suite(self):
-        """Doce trials de UNA época sintética + test de cuatro ganadores en W&B offline."""
+        """Doce trials de 1–2 épocas sintéticas + test de cuatro ganadores en W&B offline."""
         cache = AI_DIR / ".cache"
         cache.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=cache) as temp:
@@ -212,8 +350,8 @@ class TrainingTest(unittest.TestCase):
             synthetic_dataset(data)
             config = json.loads((AI_DIR / "configs" / "experiments.json").read_text())
             config.update(epochs=1, patience=1)
-            for trial in config["trials"]:
-                trial["batch_size"] = 4
+            for index, trial in enumerate(config["trials"]):
+                trial.update(batch_size=4, epochs=1 + index % 2, patience=3)
             write_json(root / "config.json", config)
             env = {**os.environ, "WANDB_SILENT": "true", "WANDB_CONSOLE": "off"}
             command = [sys.executable, str(AI_DIR / "src" / "train.py"), "--data", str(data),
@@ -224,10 +362,22 @@ class TrainingTest(unittest.TestCase):
             suite = next((root / "runs").iterdir())
             frame = pd.read_csv(suite / "training_results.csv")
             self.assertEqual(len(frame), 12)
+            self.assertEqual(set(frame.epochs), {1, 2})
+            self.assertTrue(frame.epochs_ran.eq(frame.epochs).all())
+            self.assertTrue(frame.patience.eq(3).all())
             self.assertTrue(frame.loc[frame.variant.eq("base"), "training_samples"].eq(12).all())
             self.assertTrue(frame.loc[frame.variant.eq("augmented"), "training_samples"].eq(36).all())
             self.assertTrue(frame.original_training_samples.eq(12).all())
-            self.assertTrue(frame.loc[frame.variant.eq("augmented"), "optimizer_steps"].eq(9).all())
+            self.assertTrue(frame.loc[frame.variant.eq("base"), "samples_per_epoch"].eq(10).all())
+            self.assertTrue(frame.loc[frame.variant.eq("augmented"), "samples_per_epoch"].eq(30).all())
+            self.assertTrue(frame.sampling_strategy.eq("controlled").all())
+            augmented_runs = frame.loc[frame.variant.eq("augmented")]
+            self.assertTrue(augmented_runs.optimizer_steps.eq(8 * augmented_runs.epochs_ran).all())
+            for result in frame.to_dict("records"):
+                sampling = json.loads((suite / result["experiment"] / "sampling.json").read_text())
+                self.assertEqual(sampling["unknown_fraction_actual"], .2)
+                checkpoint = torch.load(suite / result["experiment"] / "best.pt", weights_only=True)
+                self.assertEqual(checkpoint["class_weights"], [1., 1., 1.])
             saved = json.loads((suite / "augmented_dataset.json").read_text())
             self.assertEqual(saved["counts"]["train"], 36)
             self.assertEqual(len(json.loads((suite / "selection.json").read_text())["winners"]), 4)
@@ -237,7 +387,12 @@ class TrainingTest(unittest.TestCase):
                                        capture_output=True, text=True, env=env, timeout=120)
             self.assertEqual(evaluated.returncode, 0, evaluated.stdout + evaluated.stderr)
             self.assertEqual(len(pd.read_csv(suite / "test_results.csv")), 4)
-            self.assertTrue((suite / "report.md").exists())
+            import nbformat
+            report = nbformat.read(suite / "report.ipynb", as_version=4)
+            nbformat.validate(report)
+            self.assertTrue(all(cell.cell_type == "markdown" for cell in report.cells))
+            self.assertIn("Cuatro ganadores en test", report.cells[0].source)
+            self.assertFalse((suite / "report.md").exists())
             self.assertEqual(len(list((suite / "wandb").glob("offline-run-*"))), 18)
 
     def test_atomic_checkpoint_preserves_previous_on_failure(self):
@@ -263,7 +418,7 @@ class TrainingTest(unittest.TestCase):
             config = json.loads((AI_DIR / "configs/experiments.json").read_text())
             config.update(epochs=2, patience=3)
             for trial in config["trials"]:
-                trial["batch_size"] = 4
+                trial.update(batch_size=4, epochs=2, patience=3)
             write_json(root / "config.json", config)
             env = {**os.environ, "WANDB_SILENT": "true", "WANDB_CONSOLE": "off"}
             base = [sys.executable, str(AI_DIR / "src/train.py"), "--data", str(root / "data"),
@@ -273,7 +428,7 @@ class TrainingTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 return result
             for architecture in ("lenet5", "mobilenet_v1"):
-                experiment = f"{architecture}-augmented-adam_1e-3"
+                experiment = f"{architecture}-augmented-{config['trials'][0]['name']}"
                 suite = root / f"resumed-{architecture}"
                 target = suite / experiment
                 execute(base + ["--suite", str(suite), "--experiment", experiment, "--epochs-per-run", "1"])

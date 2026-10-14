@@ -4,6 +4,7 @@ import copy
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,7 @@ from experiment import (AI_DIR, log_class_metrics, log_provenance, plot_history,
                         environment, capture_rng, restore_rng, save_checkpoint, save_table)
 from metrics import run_epoch, metrics_from_confusion
 from models import build_model
+from sampling import make_training_loader, validate_sampling
 
 
 def experiment_grid(config):
@@ -39,14 +41,31 @@ def experiment_grid(config):
     if config["class_weighting"] not in ("inverse_frequency", "none"):
         raise ValueError("class_weighting no soportado")
     validate_policy(config["augmentation"])
+    resolved_trials = []
+    for trial in trials:
+        resolved = {**config, **trial}
+        validate_sampling(resolved)
+        if resolved["optimizer"] not in ("adam", "sgd"):
+            raise ValueError(f"Optimizador inválido: {trial['name']}")
+        # Validar después de combinar defaults y overrides de cada trial.
+        for key, minimum in (("epochs", 1), ("patience", 1), ("batch_size", 2)):
+            if type(resolved[key]) is not int or resolved[key] < minimum:
+                raise ValueError(f"{trial['name']}: {key} debe ser un entero >= {minimum}")
+        for key in ("lr", "weight_decay", "min_delta"):
+            value = resolved[key]
+            if (type(value) not in (int, float) or not math.isfinite(value)
+                    or value < 0 or (key == "lr" and value == 0)):
+                raise ValueError(f"{trial['name']}: {key} inválido")
+        if resolved["optimizer"] == "sgd":
+            momentum = resolved.get("momentum", 0.9)
+            if type(momentum) not in (int, float) or not math.isfinite(momentum) or not 0 <= momentum < 1:
+                raise ValueError(f"{trial['name']}: momentum debe estar en [0, 1)")
+        resolved_trials.append(resolved)
     experiments = []
     for architecture in ("lenet5", "mobilenet_v1"):
         for variant in ("base", "augmented"):
-            for trial in trials:
-                if (trial["optimizer"] not in ("adam", "sgd") or trial["lr"] <= 0
-                        or trial["batch_size"] < 2 or trial["weight_decay"] < 0):
-                    raise ValueError(f"Trial inválido: {trial['name']}")
-                experiments.append({**config, **trial, "architecture": architecture, "variant": variant,
+            for trial in resolved_trials:
+                experiments.append({**trial, "architecture": architecture, "variant": variant,
                                     "experiment": f"{architecture}-{variant}-{trial['name']}"})
     return experiments
 
@@ -82,7 +101,10 @@ def fit_one(config, dataset, suite, device, args):
     training_dataset = dataset["augmented"] if config["variant"] == "augmented" else dataset
     train_data = SpectrogramDataset(training_dataset["root"], "train")
     validation_data = SpectrogramDataset(dataset["root"], "validation")
-    train_loader = make_loader(train_data, config["batch_size"], config["seed"], args.workers, True)
+    train_loader = make_training_loader(train_data, classes, config, args.workers)
+    sampling = (train_loader.sampler.summary() if hasattr(train_loader.sampler, "summary")
+                else {"strategy": "none", "samples_per_epoch": len(train_data)})
+    write_json(directory / "sampling.json", sampling)
     clean_loader = make_loader(clean_data, config["batch_size"], config["seed"], args.workers)
     validation_loader = make_loader(validation_data, config["batch_size"], config["seed"], args.workers)
     counts = np.bincount(clean_data.y, minlength=len(classes))
@@ -125,7 +147,9 @@ def fit_one(config, dataset, suite, device, args):
                     name=config["experiment"] + (f"-resume-e{first_epoch}" if state else ""),
                     group=suite.name, job_type="train",
                     config={**config, "dataset_fingerprint": dataset["fingerprint"], "environment": env,
-                            "class_weights": weights.tolist(), "loss": "weighted_cross_entropy",
+                            "class_weights": weights.tolist(),
+                            "loss": "cross_entropy" if config["class_weighting"] == "none" else "weighted_cross_entropy",
+                            "sampling_resolved": sampling,
                             "training_dataset_fingerprint": training_dataset["fingerprint"],
                             "training_samples": len(train_data), "original_training_samples": len(clean_data),
                             "selection_metric": "validation/macro_f1", "resume_from_epoch": first_epoch - 1,
@@ -209,8 +233,12 @@ def fit_one(config, dataset, suite, device, args):
                   "variant": config["variant"], "trial": config["name"], "seed": config["seed"],
                   "training_dataset_fingerprint": training_dataset["fingerprint"],
                   "training_samples": len(train_data), "original_training_samples": len(clean_data),
+                  "samples_per_epoch": sampling["samples_per_epoch"],
+                  "sampling_strategy": sampling["strategy"],
                   "optimizer_steps": len(train_loader) * len(history),
                   "optimizer": config["optimizer"], "lr": config["lr"], "batch_size": config["batch_size"],
+                  "epochs": config["epochs"], "patience": config["patience"], "min_delta": config["min_delta"],
+                  "momentum": config.get("momentum", 0.9) if config["optimizer"] == "sgd" else None,
                   "weight_decay": config["weight_decay"], "best_epoch": best_epoch, "epochs_ran": len(history),
                   "best_validation_macro_f1": best, "best_validation_loss": best_loss,
                   "best_validation_accuracy": validation_metrics["accuracy"],

@@ -17,7 +17,7 @@ RELEASE_LIMIT = 2 * 1024**3
 REQUIRED = [f"{prefix}_{split}.npy" for split in ("train", "validation", "test") for prefix in ("X", "y")]
 REQUIRED += ["manifest.csv", "preprocessing.json", "COMPLETED.json"]
 OPTIONAL = ["audio_audit.csv", "inventory.csv", "split_counts.csv", "unknown_word_counts.csv",
-            "requirements-lock.txt", "summary.md"]
+            "requirements-lock.txt", "summary.ipynb", "summary.md"]  # summary.md: exportaciones anteriores.
 
 
 def digest(path):

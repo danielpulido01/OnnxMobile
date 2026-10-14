@@ -159,7 +159,8 @@ def log_provenance(run, dataset, directory):
     source = wandb.Artifact(f"training-source-{source_fingerprint()[:12]}", type="source")
     for path in sorted((AI_DIR / "src").glob("*.py")):
         source.add_file(str(path), name=f"src/{path.name}")
-    source.add_file(str(AI_DIR / "docs" / "architectures.md"), name="architectures.md")
+    source.add_file(str(AI_DIR / "notebooks" / "02_entrenamiento_evaluacion.ipynb"),
+                    name="notebooks/02_entrenamiento_evaluacion.ipynb")
     source.add_file(str(directory / "environment.json"))
     source.add_file(str(directory / "requirements-lock.txt"))
     source.add_file(str(directory / "config.json"))

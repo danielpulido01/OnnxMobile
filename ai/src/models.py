@@ -44,7 +44,7 @@ class EuclideanRBF(nn.Module):
 
     Los códigos de glifos de dígitos del artículo no aplican a palabras.
     Se reemplazan por códigos binarios deterministas para las clases de audio.
-    Esta adaptación se documenta para revisión académica en architectures.md.
+    Esta adaptación se documenta en el notebook 02_entrenamiento_evaluacion.ipynb.
     """
     def __init__(self, classes):
         super().__init__()

@@ -7,6 +7,7 @@ from pathlib import Path
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import pandas as pd
+import nbformat
 import torch
 import wandb
 
@@ -51,7 +52,8 @@ def write_report(suite, selection, tests):
         lines.append(f"| {architecture} | {trial} | {base.training_samples} | {augmented.training_samples} | {delta:+.4f} |")
     lines += ["", "El conjunto aumentado incluye originales y copias fijas con máscaras. Con el mismo límite de "
               "épocas recorre más ejemplos y realiza más pasos de optimización; training_results.csv registra "
-              "training_samples y optimizer_steps. Esta comparación mide la receta completa de aumento, "
+              "training_samples (almacenados), samples_per_epoch (muestreados) y optimizer_steps. "
+              "sampling.json conserva cuotas por clase y palabra unknown. Esta comparación mide la receta completa de aumento, "
               "sin aislar su efecto del presupuesto de cómputo. Los ganadores en test pueden usar distintos "
               "hiperparámetros elegidos exclusivamente por validación."]
     lines += ["", "## Evidencia de ajuste y límites", ""]
@@ -67,14 +69,15 @@ def write_report(suite, selection, tests):
               "ambas particiones y curvas estancadas sugiere subajuste; se debe interpretar junto con el baseline "
               "y los errores por clase. Estas señales no prueban por sí solas ninguna de las dos condiciones.", "",
               "La pérdida de train puede incluir aumento; para analizar la brecha se usa train_clean, calculado "
-              "sin aumento, en eval(), con el mismo checkpoint y la misma pérdida ponderada que validación.", "",
+              "sin aumento ni muestreo, en eval(), con el mismo checkpoint y la misma pérdida que validación.", "",
               "La latencia CPU corresponde a forward PyTorch con batch=1 en esta computadora. No mide "
               "preprocesamiento ni latencia ONNX en un teléfono. MACs cuenta únicamente Conv2d y Linear. "
               "Medir memoria, consumo y latencia en el dispositivo objetivo antes de elegir un despliegue.", "",
               "Un entrenamiento por configuración no estima variabilidad entre semillas; los doce ensayos "
               "usan la misma semilla para comparar hiperparámetros. Para intervalos de confianza se requieren "
               "repeticiones adicionales. No ajustar hiperparámetros después de observar test.", ""]
-    (suite / "report.md").write_text("\n".join(lines), encoding="utf-8")
+    report = nbformat.v4.new_notebook(cells=[nbformat.v4.new_markdown_cell("\n".join(lines))])
+    nbformat.write(report, suite / "report.ipynb")
 
 
 def main():
@@ -87,7 +90,7 @@ def main():
     dataset_saved = json.loads((suite / "dataset.json").read_text(encoding="utf-8"))
     selection = json.loads((suite / "selection.json").read_text(encoding="utf-8"))
     if (suite / "test_results.json").exists():
-        raise ValueError("Test ya evaluado. Reutilice test_results.json y report.md")
+        raise ValueError("Test ya evaluado. Reutilice test_results.json y report.ipynb")
     from train import select_winners
     training = pd.read_csv(suite / "training_results.csv").to_dict("records")
     if source_fingerprint() != identity["source_sha256"]:
@@ -171,10 +174,10 @@ def main():
         run.log({"test_comparison": wandb.Table(dataframe=frame),
                  "all_training_runs": wandb.Table(dataframe=pd.DataFrame(training))})
         report = wandb.Artifact(f"report-{run.id}", type="report")
-        for filename in ("report.md", "test_results.csv", "test_results.json", "selection.json", "training_results.csv"):
+        for filename in ("report.ipynb", "test_results.csv", "test_results.json", "selection.json", "training_results.csv"):
             report.add_file(str(suite / filename))
         run.log_artifact(report)
-    print(f"Informe: {suite / 'report.md'}")
+    print(f"Informe: {suite / 'report.ipynb'}")
 
 
 if __name__ == "__main__":
