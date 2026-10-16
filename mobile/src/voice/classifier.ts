@@ -115,9 +115,16 @@ async function createModel(): Promise<Model> {
  * Requiere onnxruntime-react-native (dev build); no hace ninguna llamada de red.
  */
 export class OnnxClassifier implements VoiceClassifier {
+  /** Tiempos de la última llamada a classify(), en ms. */
+  lastTiming = { preprocessMs: 0, inferenceMs: 0 };
+
   async classify(samples: Float32Array): Promise<VoiceResult> {
+    await this.load(); // fuera de la medición: la primera vez carga el modelo
+    const start = performance.now();
     const image = audioToImage(samples, melFilters.data, hannWindow.data); // [64][101], valida 16000 muestras
+    const preprocessed = performance.now();
     const logits = await this.runModel(image);
+    this.lastTiming = { preprocessMs: preprocessed - start, inferenceMs: performance.now() - preprocessed };
     return toResult(classifyLogits(logits, CONFIDENCE_THRESHOLD));
   }
 

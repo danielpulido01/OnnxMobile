@@ -5,8 +5,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { COMMANDS } from "@/engine/commands";
 import { useEngineStore } from "@/engine/store";
 import { useTheme, type Theme } from "@/theme";
-import { useVoiceCapture } from "@/voice/capture";
-import { MockClassifier, OnnxClassifier, RemoteClassifier, type VoiceResult } from "@/voice/classifier";
+import { captureAudio } from "@/voice/capture";
+import { MockClassifier, OnnxClassifier, type VoiceResult } from "@/voice/classifier";
 import type { Label } from "@/voice/labels";
 import { runModelTest, type ModelTestReport } from "@/voice/modelTest";
 import { N_SAMPLES } from "@/voice/preprocess";
@@ -14,7 +14,6 @@ import { N_SAMPLES } from "@/voice/preprocess";
 const SIMULATED: Label[] = [...COMMANDS, "unknown"];
 const classifier = new MockClassifier();
 const SILENCE = new Float32Array(N_SAMPLES); // el mock ignora el audio
-let remote: RemoteClassifier | null = null; // SOLO DESARROLLO; se crea al primer uso
 const onnx = new OnnxClassifier();
 const MAX_LOGIT_DIFF = 1e-4; // en la PC (Node) la diferencia fue 7.6e-6
 
@@ -37,14 +36,13 @@ function formatTest({ loadMs, items }: ModelTestReport): string {
 
 // Botones para probar el flujo sin micrófono ni modelo: cada botón simula lo que
 // "se escuchó" y pasa por el mismo VoiceClassifier -> dispatch que usará el modelo ONNX.
-// "Hablar" graba de verdad y clasifica en la PC con RemoteClassifier (solo desarrollo).
+// "Hablar" graba con el micrófono y clasifica con OnnxClassifier, todo en el teléfono (dev build).
 export function CommandSimulator() {
   const dispatch = useEngineStore((s) => s.dispatch);
   const [last, setLast] = useState<VoiceResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("idle");
-  const [test, setTest] = useState<string | null>(null);
-  const capture = useVoiceCapture();
+  const [info, setInfo] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
   const styles = createStyles(useTheme());
 
@@ -62,10 +60,18 @@ export function CommandSimulator() {
   async function speak() {
     try {
       setStatus("recording");
-      const samples = await capture();
+      setInfo(null);
+      const samples = await captureAudio();
       setStatus("sending");
-      remote ??= new RemoteClassifier();
-      apply(await remote.classify(samples));
+      const result = await onnx.classify(samples);
+      const { preprocessMs, inferenceMs } = onnx.lastTiming;
+      let peak = 0;
+      for (const value of samples) peak = Math.max(peak, Math.abs(value));
+      setInfo(
+        `🎤 ${result.label} (${result.confidence.toFixed(3)}) · modelo ${inferenceMs.toFixed(1)} ms · ` +
+          `espectrograma ${preprocessMs.toFixed(1)} ms · pico ${peak.toPrecision(2)}`,
+      );
+      apply(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -76,8 +82,8 @@ export function CommandSimulator() {
   async function testModel() {
     try {
       setStatus("testing");
-      setTest(null);
-      setTest(formatTest(await runModelTest(onnx)));
+      setInfo(null);
+      setInfo(formatTest(await runModelTest(onnx)));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -109,7 +115,7 @@ export function CommandSimulator() {
       >
         <Text style={styles.buttonText}>{status === "testing" ? "Probando…" : "Probar modelo"}</Text>
       </Pressable>
-      {test !== null && <Text style={styles.label}>{test}</Text>}
+      {info !== null && <Text style={styles.label}>{info}</Text>}
       <View style={styles.grid}>
         {SIMULATED.map((label) => (
           <Pressable

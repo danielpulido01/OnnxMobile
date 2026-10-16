@@ -43,7 +43,17 @@
       "expo-audio",
       "onnxruntime-react-native",
       "./plugins/withOnnxruntimeGradle9",
-      "expo-asset"
+      "expo-asset",
+      [
+        "react-native-audio-api",
+        {
+          "androidPermissions": ["android.permission.RECORD_AUDIO"],
+          "androidForegroundService": false,
+          "iosBackgroundMode": false,
+          "iosMicrophonePermission": "La app usa el micrófono para reconocer comandos de voz.",
+          "disableFFmpeg": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

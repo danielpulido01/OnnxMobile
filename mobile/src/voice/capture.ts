@@ -1,41 +1,97 @@
-import {
-  AudioQuality,
-  IOSOutputFormat,
-  requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  useAudioRecorder,
-  type RecordingOptions,
-} from "expo-audio";
-import { File } from "expo-file-system";
-import { useCallback } from "react";
+import type { AudioRecorder } from "react-native-audio-api";
 
 import { fixLength, N_SAMPLES, SAMPLE_RATE } from "./preprocess";
 
 // Se graba un poco más de 1 s para no depender de cuándo empieza a hablar el usuario.
 export const RECORD_MS = 1500;
+const BLOCK_LENGTH = SAMPLE_RATE / 10; // bloques de ~0.1 s
 
-// WAV mono PCM lineal de 16 bits a 16 kHz. Solo iOS: en Android expo-audio no ofrece
-// WAV/PCM (solo AAC, AMR, etc.), así que ahí parseWav fallará con un error claro.
-const RECORDING_OPTIONS: RecordingOptions = {
-  extension: ".wav",
-  sampleRate: SAMPLE_RATE,
-  numberOfChannels: 1,
-  bitRate: SAMPLE_RATE * 16,
-  ios: {
-    outputFormat: IOSOutputFormat.LINEARPCM,
-    audioQuality: AudioQuality.MAX,
-    linearPCMBitDepth: 16,
-    linearPCMIsBigEndian: false,
-    linearPCMIsFloat: false,
-  },
-  android: { outputFormat: "default", audioEncoder: "default" },
-  web: {},
-};
+type AudioApi = typeof import("react-native-audio-api");
+let audioApi: AudioApi | null = null;
+let recorder: AudioRecorder | null = null;
+
+// react-native-audio-api se carga con require() al primer uso: es código nativo que no existe
+// en Expo Go, y un import arriba rompería la app en el iPhone.
+function loadAudioApi(): AudioApi {
+  if (!audioApi) {
+    try {
+      audioApi = require("react-native-audio-api") as AudioApi;
+    } catch {
+      throw new Error("Este binario no incluye react-native-audio-api (¿Expo Go?): usa el dev build");
+    }
+  }
+  return audioApi;
+}
+
+function concat(chunks: Float32Array[]): Float32Array {
+  const out = new Float32Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * Graba RECORD_MS con react-native-audio-api (Android e iOS, solo dev build) y entrega 16000 muestras
+ * a 16 kHz en [-1, 1]: la ventana de 1 s con más energía. Se pide 16 kHz mono, pero se usa la
+ * frecuencia que reporta cada bloque y, si no es 16000, se remuestrea con resampleLinear.
+ */
+export async function captureAudio(): Promise<Float32Array> {
+  const { AudioManager, AudioRecorder } = loadAudioApi();
+  if ((await AudioManager.requestRecordingPermissions()) !== "Granted") {
+    throw new Error("Permiso de micrófono denegado");
+  }
+  // iOS: "measurement" desactiva el procesamiento de voz (AGC, etc.). En Android no tiene efecto.
+  AudioManager.setAudioSessionOptions({ iosCategory: "record", iosMode: "measurement", iosOptions: [] });
+  await AudioManager.setAudioSessionActivity(true);
+
+  recorder ??= new AudioRecorder();
+  const chunks: Float32Array[] = [];
+  const rates = new Set<number>();
+  const setup = recorder.onAudioReady(
+    { sampleRate: SAMPLE_RATE, bufferLength: BLOCK_LENGTH, channelCount: 1 },
+    ({ buffer }) => {
+      rates.add(buffer.sampleRate);
+      // Copia (slice): el bloque puede reutilizar memoria nativa. Si llega en estéreo, se promedia.
+      const mono = buffer.getChannelData(0).slice();
+      for (let c = 1; c < buffer.numberOfChannels; c++) {
+        const channel = buffer.getChannelData(c);
+        for (let i = 0; i < mono.length; i++) mono[i] += channel[i];
+      }
+      if (buffer.numberOfChannels > 1) for (let i = 0; i < mono.length; i++) mono[i] /= buffer.numberOfChannels;
+      chunks.push(mono);
+    },
+  );
+  try {
+    if (setup.status === "error") throw new Error(`onAudioReady: ${setup.message}`);
+    const started = await recorder.start();
+    if (started.status === "error") throw new Error(`No se pudo grabar: ${started.message}`);
+    await new Promise((resolve) => setTimeout(resolve, RECORD_MS));
+    await recorder.stop();
+  } finally {
+    recorder.clearOnAudioReady();
+    await AudioManager.setAudioSessionActivity(false);
+  }
+
+  if (chunks.length === 0) throw new Error("El micrófono no entregó audio");
+  const [rate] = rates;
+  if (rates.size > 1) console.warn(`[capture] frecuencias distintas entre bloques: ${[...rates].join(", ")} Hz; se usa ${rate}`);
+  const raw = concat(chunks);
+  const resampled = resampleLinear(raw, rate, SAMPLE_RATE);
+  console.log(
+    `[capture] frecuencia real=${[...rates].join("/")} Hz, bloques=${chunks.length}, ` +
+      `muestras=${raw.length} (${(raw.length / rate).toFixed(2)} s)` +
+      (rate !== SAMPLE_RATE ? `, remuestreadas a ${SAMPLE_RATE} Hz: ${resampled.length}` : ""),
+  );
+  return loudestWindow(resampled);
+}
 
 const PCM = 1;
 const EXTENSIBLE = 0xfffe;
 
-/** WAV PCM de 16 bits little-endian -> muestras en [-1, 1] (int16 / 32768, promedio de canales). */
+/** WAV PCM de 16 bits little-endian -> muestras en [-1, 1] (int16 / 32768, promedio de canales). Lo usa modelTest. */
 export function parseWav(bytes: Uint8Array): { samples: Float32Array; sampleRate: number } {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = (offset: number) => String.fromCharCode(...bytes.subarray(offset, offset + 4));
@@ -106,28 +162,4 @@ export function loudestWindow(samples: Float32Array): Float32Array {
     }
   }
   return samples.slice(bestStart, bestStart + N_SAMPLES);
-}
-
-/** Hook: devuelve capture(), que graba RECORD_MS y entrega 16000 muestras a 16 kHz en [-1, 1]. */
-export function useVoiceCapture(): () => Promise<Float32Array> {
-  const recorder = useAudioRecorder(RECORDING_OPTIONS);
-
-  return useCallback(async () => {
-    const permission = await requestRecordingPermissionsAsync();
-    if (!permission.granted) throw new Error("Permiso de micrófono denegado");
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-
-    await recorder.prepareToRecordAsync();
-    recorder.record();
-    await new Promise((resolve) => setTimeout(resolve, RECORD_MS));
-    await recorder.stop();
-    if (!recorder.uri) throw new Error("La grabación no generó archivo");
-
-    const file = new File(recorder.uri);
-    const bytes = await file.bytes();
-    file.delete();
-    const { samples, sampleRate } = parseWav(bytes);
-    if (sampleRate !== SAMPLE_RATE) console.log(`[capture] grabado a ${sampleRate} Hz, remuestreando a ${SAMPLE_RATE}`);
-    return loudestWindow(resampleLinear(samples, sampleRate, SAMPLE_RATE));
-  }, [recorder]);
 }
