@@ -1,0 +1,42 @@
+{
+  "description": "Logits de model.onnx en la PC (onnxruntime 1.31.0) para los WAV de esta carpeta; copiados de scripts/reference/reference.json para el botón Probar modelo.",
+  "model_sha256": "c0bbfa8e9adb72f3ab320eb37265e2fba7cf6be0feebb45ad9ae9cafb84d2c6d",
+  "items": [
+    {
+      "name": "yes__cc8b3228_nohash_0",
+      "label": "yes",
+      "predicted_label": "yes",
+      "logits": [
+        -0.20399844646453857,
+        -11.198282241821289,
+        -10.543455123901367,
+        -14.526142120361328,
+        -10.537018775939941,
+        -10.9365816116333,
+        -9.740614891052246,
+        -6.464592933654785,
+        -8.357511520385742,
+        -16.373741149902344,
+        -7.889059066772461
+      ]
+    },
+    {
+      "name": "go__471a0925_nohash_2",
+      "label": "go",
+      "predicted_label": "go",
+      "logits": [
+        -12.199198722839355,
+        -3.4937376976013184,
+        -11.352261543273926,
+        -7.472151756286621,
+        -9.21321964263916,
+        -12.203418731689453,
+        -6.96714973449707,
+        -7.862471103668213,
+        -11.204568862915039,
+        2.8611562252044678,
+        2.719254493713379
+      ]
+    }
+  ]
+}

@@ -5,7 +5,10 @@
   "dependencies": {
     "@expo/ui": "~57.0.24",
     "expo": "~57.0.29",
+    "expo-asset": "~57.0.20",
+    "expo-audio": "~57.0.5",
     "expo-constants": "~57.0.22",
+    "expo-dev-client": "~57.0.20",
     "expo-device": "~57.0.2",
     "expo-font": "~57.0.4",
     "expo-glass-effect": "~57.0.4",
@@ -17,6 +20,7 @@
     "expo-symbols": "~57.0.3",
     "expo-system-ui": "~57.0.4",
     "expo-web-browser": "~57.0.3",
+    "onnxruntime-react-native": "^1.24.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
@@ -30,6 +34,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "onnxruntime-node": "^1.30.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
