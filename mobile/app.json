@@ -40,6 +40,7 @@
       ],
       "onnxruntime-react-native",
       "./plugins/withOnnxruntimeGradle9",
+      "./plugins/withReleasePermissions",
       "expo-asset",
       [
         "react-native-audio-api",
