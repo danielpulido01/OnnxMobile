@@ -49,11 +49,11 @@ export async function captureAudio(): Promise<Float32Array> {
 
   recorder ??= new AudioRecorder();
   const chunks: Float32Array[] = [];
-  const rates = new Set<number>();
+  const blockRates: number[] = []; // frecuencia que reporta cada bloque
   const setup = recorder.onAudioReady(
     { sampleRate: SAMPLE_RATE, bufferLength: BLOCK_LENGTH, channelCount: 1 },
     ({ buffer }) => {
-      rates.add(buffer.sampleRate);
+      blockRates.push(buffer.sampleRate);
       // Copia (slice): el bloque puede reutilizar memoria nativa. Si llega en estéreo, se promedia.
       const mono = buffer.getChannelData(0).slice();
       for (let c = 1; c < buffer.numberOfChannels; c++) {
@@ -76,59 +76,37 @@ export async function captureAudio(): Promise<Float32Array> {
   }
 
   if (chunks.length === 0) throw new Error("El micrófono no entregó audio");
+  const rates = new Set(blockRates);
   const [rate] = rates;
   if (rates.size > 1) console.warn(`[capture] frecuencias distintas entre bloques: ${[...rates].join(", ")} Hz; se usa ${rate}`);
   const raw = concat(chunks);
   const resampled = resampleLinear(raw, rate, SAMPLE_RATE);
-  console.log(
-    `[capture] frecuencia real=${[...rates].join("/")} Hz, bloques=${chunks.length}, ` +
-      `muestras=${raw.length} (${(raw.length / rate).toFixed(2)} s)` +
-      (rate !== SAMPLE_RATE ? `, remuestreadas a ${SAMPLE_RATE} Hz: ${resampled.length}` : ""),
-  );
-  return loudestWindow(resampled);
+  const start = loudestStart(resampled);
+  const window = loudestWindow(resampled);
+  if (__DEV__) {
+    let sumSquares = 0;
+    for (const value of window) sumSquares += value * value;
+    const seconds = (samples: number) => (samples / SAMPLE_RATE).toFixed(3);
+    const end = Math.min(start + N_SAMPLES, resampled.length);
+    console.log(`[capture] frecuencia por bloque (Hz): ${blockRates.join(", ")}`);
+    console.log(
+      `[capture] muestras capturadas=${raw.length} a ${rate} Hz (${(raw.length / rate).toFixed(2)} s), ` +
+        (rate !== SAMPLE_RATE ? `remuestreo ${rate} -> ${SAMPLE_RATE} Hz: ${resampled.length} muestras` : "sin remuestreo"),
+    );
+    console.log(
+      `[capture] ventana: muestras ${start}-${end} de ${resampled.length} (${seconds(start)}-${seconds(end)} s)` +
+        (resampled.length < N_SAMPLES ? `, relleno con ${N_SAMPLES - resampled.length} ceros al final` : "") +
+        `, pico=${peakOf(window).toFixed(4)}, RMS=${Math.sqrt(sumSquares / window.length).toFixed(4)}`,
+    );
+  }
+  return window;
 }
 
-const PCM = 1;
-const EXTENSIBLE = 0xfffe;
-
-/** WAV PCM de 16 bits little-endian -> muestras en [-1, 1] (int16 / 32768, promedio de canales). Lo usa modelTest. */
-export function parseWav(bytes: Uint8Array): { samples: Float32Array; sampleRate: number } {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const tag = (offset: number) => String.fromCharCode(...bytes.subarray(offset, offset + 4));
-  if (bytes.length < 12 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new Error("La grabación no es un WAV");
-  let format: { code: number; channels: number; sampleRate: number; bits: number } | null = null;
-  // Recorre los chunks: iOS puede poner otros (p. ej. "FLLR") antes de "data".
-  for (let offset = 12; offset + 8 <= bytes.length; ) {
-    const id = tag(offset);
-    const size = view.getUint32(offset + 4, true);
-    const body = offset + 8;
-    if (id === "fmt ") {
-      let code = view.getUint16(body, true);
-      if (code === EXTENSIBLE && size >= 26) code = view.getUint16(body + 24, true); // subformato
-      format = {
-        code,
-        channels: view.getUint16(body + 2, true),
-        sampleRate: view.getUint32(body + 4, true),
-        bits: view.getUint16(body + 14, true),
-      };
-    } else if (id === "data") {
-      if (!format || format.code !== PCM || format.bits !== 16) {
-        throw new Error(`WAV no soportado: formato ${format?.code}, ${format?.bits} bits (se espera PCM de 16)`);
-      }
-      const frames = Math.floor(Math.min(size, bytes.length - body) / (2 * format.channels));
-      const samples = new Float32Array(frames);
-      for (let i = 0; i < frames; i++) {
-        let sum = 0;
-        for (let c = 0; c < format.channels; c++) {
-          sum += view.getInt16(body + 2 * (i * format.channels + c), true) / 32768;
-        }
-        samples[i] = sum / format.channels;
-      }
-      return { samples, sampleRate: format.sampleRate };
-    }
-    offset = body + size + (size % 2); // los chunks se alinean a 2 bytes
-  }
-  throw new Error("WAV sin chunk data");
+/** Máximo valor absoluto de las muestras (lo usa el filtro de silencio). */
+export function peakOf(samples: Float32Array): number {
+  let peak = 0;
+  for (const value of samples) peak = Math.max(peak, Math.abs(value));
+  return peak;
 }
 
 /** Remuestreo por interpolación lineal (sin filtro antialiasing; suficiente para pruebas). */
@@ -148,6 +126,13 @@ export function resampleLinear(samples: Float32Array, from: number, to: number):
 /** Ventana de 16000 muestras con más energía; si el audio es más corto, fixLength (ceros al final). */
 export function loudestWindow(samples: Float32Array): Float32Array {
   if (samples.length <= N_SAMPLES) return fixLength(samples);
+  const start = loudestStart(samples);
+  return samples.slice(start, start + N_SAMPLES);
+}
+
+/** Inicio de la ventana de 16000 muestras con más energía (0 si el audio no es más largo). */
+function loudestStart(samples: Float32Array): number {
+  if (samples.length <= N_SAMPLES) return 0;
   let energy = 0;
   for (let i = 0; i < N_SAMPLES; i++) energy += samples[i] * samples[i];
   let best = energy;
@@ -161,5 +146,5 @@ export function loudestWindow(samples: Float32Array): Float32Array {
       bestStart = start;
     }
   }
-  return samples.slice(bestStart, bestStart + N_SAMPLES);
+  return bestStart;
 }

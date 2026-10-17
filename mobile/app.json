@@ -20,9 +20,7 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "package": "com.sebasmumo2630.tmpapp"
     },
@@ -40,7 +38,6 @@
           "imageWidth": 76
         }
       ],
-      "expo-audio",
       "onnxruntime-react-native",
       "./plugins/withOnnxruntimeGradle9",
       "expo-asset",

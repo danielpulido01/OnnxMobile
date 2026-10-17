@@ -9,3 +9,4 @@ ai/.cache/
 ai/notebooks/*.executed.ipynb
 ai/runs/
 wandb/
+/captures.tar

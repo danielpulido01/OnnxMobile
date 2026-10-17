@@ -5,7 +5,8 @@
 // - Debe revisarse con grabaciones reales del micrófono del celular.
 export const CONFIDENCE_THRESHOLD = 0.7;
 
-// SOLO DESARROLLO: URL de scripts/dev_server.mjs que usa RemoteClassifier, p. ej.
-// "http://192.168.1.50:8787". Se define en mobile/.env.local (ver .env.example).
-// El objetivo final es OnnxClassifier en Android, que no necesita servidor.
-export const DEV_SERVER_URL = process.env.EXPO_PUBLIC_DEV_SERVER_URL ?? "";
+// Filtro de silencio: si el pico (máximo |muestra|) de la ventana de 1 s es menor, no se ejecuta
+// el modelo y es un no-op ("Sin voz"). Hace falta porque el espectrograma se normaliza con el
+// máximo del clip (ref = max) y el silencio amplificado llegaba a clasificarse como comando
+// (p. ej. pico 0.00019 -> "up" 0.79). Valor inicial; ajustar con los picos de los logs [capture].
+export const SILENCE_PEAK_THRESHOLD = 0.02;

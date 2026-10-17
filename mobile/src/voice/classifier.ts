@@ -7,87 +7,23 @@ import hannWindow from "@/assets/model/hann_window.json";
 import melFilters from "@/assets/model/mel_filters.json";
 import type { Command } from "@/engine/commands";
 
-import { CONFIDENCE_THRESHOLD, DEV_SERVER_URL } from "./config";
-import { classify as classifyLogits, LABELS, type Label, type Prediction } from "./labels";
-import { audioToImage, N_FRAMES, N_MELS, N_SAMPLES } from "./preprocess";
-
-const REMOTE_TIMEOUT_MS = 5000;
+import { CONFIDENCE_THRESHOLD } from "./config";
+import { classify as classifyLogits, type Label, type Prediction } from "./labels";
+import { audioToImage, N_FRAMES, N_MELS } from "./preprocess";
 
 export type VoiceResult = {
   command: Command | null; // null = no-op ("unknown" o confianza bajo el umbral)
   label: Label;
   confidence: number;
+  probabilities: number[]; // softmax de las 11 clases, en el orden de LABELS
 };
 
-// Contrato común: el simulador usa MockClassifier y la app con micrófono usará OnnxClassifier.
 export interface VoiceClassifier {
   classify(samples: Float32Array): Promise<VoiceResult>;
 }
 
-function toResult({ command, label, confidence }: Prediction): VoiceResult {
-  return { command, label, confidence };
-}
-
-// Logits falsos cuyo softmax da `confidence` a la etiqueta elegida, para que el mock pase
-// por el mismo classify() de labels.ts (umbral y no-op de "unknown") que el modelo real.
-function fakeLogits(label: Label, confidence: number): number[] {
-  const others = LABELS.length - 1;
-  const target = confidence >= 1 ? 20 : Math.log((confidence * others) / (1 - confidence));
-  return LABELS.map((l) => (l === label ? target : 0));
-}
-
-/**
- * Sin micrófono ni modelo: el simulador elige con queue() qué "se escuchó" y luego llama a
- * classify(). Las muestras de audio se ignoran.
- */
-export class MockClassifier implements VoiceClassifier {
-  private next: { label: Label; confidence: number } = { label: "unknown", confidence: 1 };
-
-  queue(label: Label, confidence = 1): void {
-    if (!(confidence > 1 / LABELS.length && confidence <= 1)) {
-      throw new Error(`La confianza debe estar en (${(1 / LABELS.length).toFixed(3)}, 1]`);
-    }
-    this.next = { label, confidence };
-  }
-
-  async classify(_samples: Float32Array): Promise<VoiceResult> {
-    const { label, confidence } = this.next;
-    return toResult(classifyLogits(fakeLogits(label, confidence), CONFIDENCE_THRESHOLD));
-  }
-}
-
-/**
- * SOLO DESARROLLO: manda las 16000 muestras a scripts/dev_server.mjs (onnxruntime-node en la PC),
- * para probar micrófono + modelo en Expo Go. El objetivo final es OnnxClassifier en Android.
- */
-export class RemoteClassifier implements VoiceClassifier {
-  private readonly url: string;
-
-  constructor(baseUrl: string = DEV_SERVER_URL) {
-    if (!baseUrl) throw new Error("Falta EXPO_PUBLIC_DEV_SERVER_URL en mobile/.env.local");
-    this.url = `${baseUrl.replace(/\/+$/, "")}/classify`;
-  }
-
-  async classify(samples: Float32Array): Promise<VoiceResult> {
-    if (samples.length !== N_SAMPLES) throw new Error(`Se requieren ${N_SAMPLES} muestras`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REMOTE_TIMEOUT_MS);
-    try {
-      const response = await fetch(this.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ samples: Array.from(samples) }),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`Servidor: ${response.status} ${await response.text()}`);
-      return (await response.json()) as VoiceResult;
-    } catch (error) {
-      if (controller.signal.aborted) throw new Error(`Sin respuesta de ${this.url} en ${REMOTE_TIMEOUT_MS / 1000} s`);
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+function toResult({ command, label, confidence, probabilities }: Prediction): VoiceResult {
+  return { command, label, confidence, probabilities };
 }
 
 type Ort = typeof import("onnxruntime-react-native");
