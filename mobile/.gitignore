@@ -41,3 +41,10 @@ example
 # generated native folders
 /ios
 /android
+
+scripts/input/
+scripts/.venv/
+
+# WAV de depuración sacados del teléfono (files/captures/)
+captures/
+captures.tar

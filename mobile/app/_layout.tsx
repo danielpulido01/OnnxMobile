@@ -4,7 +4,7 @@ import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { CommandFeedback } from "@/components/CommandFeedback";
-import { CommandSimulator } from "@/components/CommandSimulator";
+import { VoiceBar } from "@/components/VoiceBar";
 import { useEngineStore } from "@/engine/store";
 import { useTheme } from "@/theme";
 
@@ -31,7 +31,7 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: theme.colors.bg },
         }}
       />
-      <CommandSimulator />
+      <VoiceBar />
       <CommandFeedback />
     </View>
   );
